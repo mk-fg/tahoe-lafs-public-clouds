@@ -1,11 +1,11 @@
 
 from os.path import basename, dirname, normpath, join
-from zope.interface import implements
+import re
 
-from twisted.python.filepath import FilePath
+from zope.interface import implements
 from twisted.internet import defer
 
-from allmydata.node import InvalidValueError
+from allmydata.node import InvalidValueError, MissingConfigEntry
 from allmydata.storage.backends.cloud.cloud_common import IContainer, \
      ContainerRetryMixin, ContainerListMixin
 from allmydata.util.hashutil import sha1
@@ -16,8 +16,27 @@ def configure_skydrive_container(storedir, config):
     from allmydata.storage.backends.cloud.skydrive.skydrive_container import SkyDriveContainer
 
     client_id = config.get_config("storage", "skydrive.client_id")
-    client_secret = config.get_or_create_private_config("skydrive_client_secret")
-    auth_code = config.get_or_create_private_config("skydrive_auth_code")
+    client_secret = config.get_private_config("skydrive_client_secret")
+
+    try: auth_code = config.get_private_config("skydrive_auth_code")
+    except MissingConfigEntry:
+        from txskydrive.api_v5 import txSkyDrive
+        api = txSkyDrive(client_id=client_id, client_secret=client_secret)
+        raise MissingConfigEntry(
+            '\n\n'
+            'Visit the following URL in any web browser (firefox, chrome, safari, etc),\n'
+                '  authorize there, confirm access permissions, and paste URL of an empty page\n'
+                '  (starting with "https://login.live.com/oauth20_desktop.srf") you will get\n'
+                '  redirected to in the end into "private/skydrive_auth_code" file.\n\n'
+            ' See "Authorization" section in "doc/cloud.rst" for details.\n\n'
+            ' URL to visit: %s\n'%(api.auth_user_get_url()) )
+
+    if re.search(r'^https?://', auth_code):
+        from txskydrive.api_v5 import txSkyDrive
+        api = txSkyDrive(client_id=client_id, client_secret=client_secret)
+        api.auth_user_process_url(auth_code)
+        config.write_private_config("skydrive_auth_code", api.auth_code)
+
     access_token = config.get_optional_private_config("skydrive_access_token")
     refresh_token = config.get_optional_private_config("skydrive_refresh_token")
 
@@ -25,7 +44,7 @@ def configure_skydrive_container(storedir, config):
     folder_id = config.get_config("storage", "skydrive.folder_id", None)
     folder_path = config.get_config("storage", "skydrive.folder_path", None)
 
-    if folder_id and not folder_path:
+    if not folder_id and not folder_path:
         raise InvalidValueError("Either skydrive.folder_id or skydrive.folder_path must be specified.")
     elif folder_id and folder_path:
         raise InvalidValueError( "Only one of skydrive.folder_id"
@@ -36,22 +55,19 @@ def configure_skydrive_container(storedir, config):
     else:
         folder_id_created = False
 
-    if not container.match_folder_id_vs_path():
-        raise InvalidValueError("skydrive.folder_id doesn't match specified skydrive.folder_path.")
-
-    mapping_path = FilePath(storedir).child("skydrive_idmap.db")
+    mapping_path = storedir.child("skydrive_idmap.db")
 
     def token_update_handler(self, auth_access_token, auth_refresh_token, **kwargs):
         config.write_private_config("skydrive_access_token", auth_access_token)
         config.write_private_config("skydrive_refresh_token", auth_refresh_token)
 
-    def folder_id_update(self, folder_id):
+    def folder_id_update_handler(self, folder_id):
         config.write_private_config("skydrive_folder_id")
 
     container = SkyDriveContainer( api_url, folder_id, folder_path,
         client_id, client_secret, auth_code, mapping_path,
         token_update_handler=token_update_handler,
-        folder_id_update=folder_id_update,
+        folder_id_update_handler=folder_id_update_handler,
         access_token=access_token, refresh_token=refresh_token )
 
     return container
@@ -70,7 +86,7 @@ class SkyDriveItem(object):
     @classmethod
     def from_info(cls, info):
         etag = sha1('\0'.join([info['id'], info['name'], info['updated_time']])).hexdigest()
-        return cls(info['id', info['updated_time'], etag, info['size'], 'STANDARD', None)
+        return cls(info['id'], info['updated_time'], etag, info['size'], 'STANDARD', None)
 
 
 class SkyDriveListing(object):
@@ -94,9 +110,9 @@ class SkyDriveContainer(ContainerRetryMixin):
 
     def __init__( self, api_url, folder_id, folder_path,
             client_id, client_secret, auth_code, mapping_path,
-            token_update_handler=token_update_handler,
-            folder_id_update=folder_id_update,
-            access_token=access_token, refresh_token=refresh_token ):
+            token_update_handler=None,
+            folder_id_update_handler=None,
+            access_token=None, refresh_token=None ):
         # Only depend on txskydrive when this class is actually instantiated.
         from txskydrive.api_v5 import txSkyDrivePluggableSync,\
             SkyDriveInteractionError, DoesNotExists
@@ -104,16 +120,16 @@ class SkyDriveContainer(ContainerRetryMixin):
 
         self.client = txSkyDrivePluggableSync(
             client_id=client_id, client_secret=client_secret, auth_code=auth_code,
-            auth_access_token=access_token, auth_refresh_token=refresh_token
-            api_url=api_url, config_update_callback=token_update_handler )
+            auth_access_token=access_token, auth_refresh_token=refresh_token,
+            api_url_base=api_url, config_update_callback=token_update_handler )
 
         self.folder_path = normpath(folder_path).lstrip('/')
         self.folder_id = folder_id
-        self.folder_id_update = folder_id_update
+        self.folder_id_update_handler = folder_id_update_handler
         self.folder_name = folder_path or folder_id
 
-        self.chunk_idmap_path = mapping_path
-        self.chunk_idmap = anydbm.open(mapping_path, 'c')
+        self.chunk_idmap_path = mapping_path.path
+        self.chunk_idmap = anydbm.open(mapping_path.path, 'c')
 
         self.ServiceError = SkyDriveInteractionError
 
@@ -126,7 +142,7 @@ class SkyDriveContainer(ContainerRetryMixin):
 
         def _match_folder_id(folder_path_id):
             if folder_path_id != folder_id:
-                self.folder_id_update(folder_path_id)
+                self.folder_id_update_handler(folder_path_id)
                 self.folder_id = folder_path_id
 
         def _create_folder(parent_info, name):
