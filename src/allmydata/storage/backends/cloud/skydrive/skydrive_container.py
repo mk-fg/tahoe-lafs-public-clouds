@@ -4,6 +4,7 @@ import re
 
 from zope.interface import implements
 from twisted.internet import defer
+from twisted.web import http
 
 from allmydata.node import InvalidValueError, MissingConfigEntry
 from allmydata.storage.backends.cloud.cloud_common import IContainer, \
@@ -57,12 +58,15 @@ def configure_skydrive_container(storedir, config):
 
     mapping_path = storedir.child("skydrive_idmap.db")
 
-    def token_update_handler(self, auth_access_token, auth_refresh_token, **kwargs):
+    def token_update_handler(auth_access_token, auth_refresh_token, **kwargs):
         config.write_private_config("skydrive_access_token", auth_access_token)
         config.write_private_config("skydrive_refresh_token", auth_refresh_token)
+        if kwargs:
+            log.msg( 'Received unhandled SkyDrive access'
+                ' data, discarded: %s'%(', '.join(kwargs.keys())), level=log.WEIRD )
 
-    def folder_id_update_handler(self, folder_id):
-        config.write_private_config("skydrive_folder_id")
+    def folder_id_update_handler(folder_id):
+        config.write_private_config("skydrive_folder_id", folder_id)
 
     container = SkyDriveContainer( api_url, folder_id, folder_path,
         client_id, client_secret, auth_code, mapping_path,
@@ -72,6 +76,15 @@ def configure_skydrive_container(storedir, config):
 
     return container
 
+
+
+def encode_object_name(name):
+    return name.replace('_', '__').replace('/', '_')
+
+def decode_object_name(name_enc):
+    if isinstance(name_enc, unicode):
+        name_enc = name_enc.encode('utf-8')
+    return '__'.join(c.replace('_', '/') for c in name_enc.split('__'))
 
 class SkyDriveItem(object):
 
@@ -84,10 +97,10 @@ class SkyDriveItem(object):
         self.owner = owner
 
     @classmethod
-    def from_info(cls, info):
+    def from_info(cls, info, key=None):
+        key = key or decode_object_name(info['name'])
         etag = sha1('\0'.join([info['id'], info['name'], info['updated_time']])).hexdigest()
-        return cls(info['id'], info['updated_time'], etag, info['size'], 'STANDARD', None)
-
+        return cls(key, info['updated_time'], etag, info['size'], 'STANDARD', None)
 
 class SkyDriveListing(object):
 
@@ -114,8 +127,7 @@ class SkyDriveContainer(ContainerRetryMixin):
             folder_id_update_handler=None,
             access_token=None, refresh_token=None ):
         # Only depend on txskydrive when this class is actually instantiated.
-        from txskydrive.api_v5 import txSkyDrivePluggableSync,\
-            SkyDriveInteractionError, DoesNotExists
+        from txskydrive.api_v5 import txSkyDrivePluggableSync, ProtocolError
         import anydbm
 
         self.client = txSkyDrivePluggableSync(
@@ -131,14 +143,16 @@ class SkyDriveContainer(ContainerRetryMixin):
         self.chunk_idmap_path = mapping_path.path
         self.chunk_idmap = anydbm.open(mapping_path.path, 'c')
 
-        self.ServiceError = SkyDriveInteractionError
+        self.ServiceError = ProtocolError
 
     def __repr__(self):
         return ("<%s %r>" % (self.__class__.__name__, self.folder_name,))
 
 
     def ensure_folder(self, folder_path, folder_id):
-        d = self._do_request('resolve path', self.client.resolve_path, folder_path)
+        from txskydrive.api_v5 import DoesNotExists
+        import anydbm
+        d = self._do_request('resolve storage path', self.client.resolve_path, folder_path)
 
         def _match_folder_id(folder_path_id):
             if folder_path_id != folder_id:
@@ -148,8 +162,9 @@ class SkyDriveContainer(ContainerRetryMixin):
         def _create_folder(parent_info, name):
             return self._do_request('mkdir', self.client.mkdir, name, parent_info['id'])
 
-        def _folder_lookup_error(reason, path):
-            reason.trap(DoesNotExists)
+        def _folder_lookup_error(failure, path):
+            failure.trap(DoesNotExists)
+            parent, missing_component = failure.value.args
             path = path.rsplit('/', 1)
             if len(path) > 1:
                 d = self._do_request('resolve path', self.client.resolve_path, path[0])
@@ -170,6 +185,7 @@ class SkyDriveContainer(ContainerRetryMixin):
         d.addCallback(_match_folder_id)
         return d
 
+
     def create(self):
         return self._do_request( 'create/check folder',
             self.ensure_folder, self.folder_path, self.folder_id )
@@ -182,19 +198,35 @@ class SkyDriveContainer(ContainerRetryMixin):
         return d
 
 
-    def encode_object_name(self, name):
-        return name.replace('_', '__').replace('/', '_')
+    def handle_enoent(func):
+        'Handle missing path errors by checking/creating root folder and trying again.'
+        from txskydrive.api_v5 import ProtocolError
+        def _enoent_handler(failure, self, args, kwargs):
+            failure.trap(ProtocolError)
+            if failure.value.code not in [http.NOT_FOUND, http.GONE]:
+                return failure
+            d = self.create()
+            d.addCallback(lambda ignored: func(self, *args, **kwargs))
+            return d
+        def _wrapper(self, *args, **kwargs):
+            if not self.folder_id:
+                d = self.create()
+                d.addCallback(lambda ignored: func(self, *args, **kwargs))
+            else:
+                d = func(self, *args, **kwargs)
+                d.addErrback(_enoent_handler, self, args, kwargs)
+            return d
+        return _wrapper
 
-    def decode_object_name(self, name_enc):
-        return '__'.join(c.replace('_', '/') for c in name_enc.split('__'))
 
+    @handle_enoent
     def resolve_object_name(self, object_name):
         try:
-            return defer.suceed(self.chunk_idmap[object_name])
+            return defer.succeed(self.chunk_idmap[object_name])
         except KeyError: pass
 
-        d = self._do_request( 'resolve path', self.client.resolve_path,
-            join(self.folder_path, self.encode_object_name(object_name)) )
+        d = self._do_request( 'resolve object path', self.client.resolve_path,
+            encode_object_name(object_name), root_id=self.folder_id )
         def _update_idmap(cid):
             self.chunk_idmap[object_name] = cid
             return cid
@@ -202,21 +234,27 @@ class SkyDriveContainer(ContainerRetryMixin):
         return d
 
 
+    @handle_enoent
     def list_objects(self, prefix=''):
         d = self._do_request('list objects', self.client.listdir, self.folder_id, type_filter='file')
         def _filter_objects(lst):
-            contents = list(
-                SkyDriveItem.from_info(info)
-                for info in lst if info['name'].startswith(prefix) )
+            contents = list()
+            for info in lst:
+                # Use this chance to populate the chunk_idmap cache
+                key = decode_object_name(info['name'])
+                self.chunk_idmap[key] = info['id']
+                if not key.startswith(prefix): continue
+                contents.append(SkyDriveItem.from_info(info, key=key))
             return SkyDriveListing(self.folder_name, '', '', 1000, 'false', contents, None)
         d.addCallback(_filter_objects)
         return d
 
+    @handle_enoent
     def put_object(self, object_name, data, content_type=None, metadata={}):
         assert content_type is None, content_type
         assert metadata == {}, metadata
         d = self._do_request( 'PUT object', self.client.put,
-            (self.encode_object_name(object_name), data), self.folder_id )
+            (encode_object_name(object_name), data), self.folder_id )
         def _cache_object_id(info):
             self.chunk_idmap[object_name] = info['id']
         d.addCallback(_cache_object_id)
