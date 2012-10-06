@@ -5,10 +5,11 @@ import re
 from zope.interface import implements
 from twisted.internet import reactor, defer
 from twisted.web import http
+from twisted.python.failure import Failure
 
 from allmydata.node import InvalidValueError, MissingConfigEntry
 from allmydata.storage.backends.cloud.cloud_common import IContainer, \
-     ContainerRetryMixin, ContainerListMixin
+     ContainerRetryMixin, ContainerListMixin, CloudError
 from allmydata.util.hashutil import sha1
 from allmydata.util import log
 
@@ -100,15 +101,14 @@ class DeferredCache(object):
         self.cache_ttl = cache_ttl
 
     def _activate(self, res):
-        assert self.deferred
         self.deferred = None
         for d in self.listeners: d.callback(res)
-        if self.cache_ttl is not None:
-            self.cache = res
-            if self.cache_ttl > 0:
-                self.cache_ttl_flush = reactor.callLater(self.cache_ttl, self.flush)
         self.listeners.clear()
-        return res
+        if not isinstance(res, Failure):
+            if self.cache_ttl is not None:
+                self.cache = res
+                if self.cache_ttl > 0:
+                    self.cache_ttl_flush = reactor.callLater(self.cache_ttl, self.flush)
 
     def register_update_callback(self, func, *args, **kwargs):
         self.callback = func, args, kwargs
@@ -130,7 +130,6 @@ class DeferredCache(object):
         func, args, kwargs = self.callback
         d = self.deferred = func(*args, **kwargs)
         d.addBoth(self._activate)
-        return d
 
     def flush(self, ignored=None):
         self.cache = self._empty
@@ -209,7 +208,8 @@ class SkyDriveContainer(ContainerRetryMixin):
         import anydbm
         d = self._do_request('resolve storage path', self.client.resolve_path, folder_path)
 
-        def _match_folder_id(folder_path_id):
+        def _match_folder_id(path_info):
+            folder_path_id = path_info['id']
             if folder_path_id != folder_id:
                 self.folder_id_update_handler(folder_path_id)
                 self.folder_id = folder_path_id
@@ -242,9 +242,10 @@ class SkyDriveContainer(ContainerRetryMixin):
     def _create_combinator(self):
         if not self._create_combinator_v:
             self._create_combinator_v = DeferredCache()
+            def _ensure_folder():
+                return self.ensure_folder(self.folder_path, self.folder_id)
             self._create_combinator_v.register_update_callback(
-                self._do_request, 'create/check folder',
-                self.ensure_folder, self.folder_path, self.folder_id )
+                self._do_request, 'create/check folder', _ensure_folder )
         return self._create_combinator_v
 
     _list_cache_v = None
@@ -253,8 +254,9 @@ class SkyDriveContainer(ContainerRetryMixin):
     def _list_cache(self):
         if not self._list_cache_v:
             self._list_cache_v = DeferredCache(cache_ttl=self._list_cache_ttl)
-            self._list_cache_v.register_update_callback(
-                self._do_request, 'list objects', self.client.listdir, self.folder_id, type_filter='file' )
+            def _listdir():
+                return self.client.listdir(self.folder_id, type_filter='file')
+            self._list_cache_v.register_update_callback(self._do_request, 'list objects', _listdir)
         return self._list_cache_v
 
 
@@ -274,8 +276,11 @@ class SkyDriveContainer(ContainerRetryMixin):
         'Handle missing path errors by checking/creating root folder and trying again.'
         from txskydrive.api_v5 import ProtocolError
         def _enoent_handler(failure, self, args, kwargs):
-            failure.trap(ProtocolError)
-            if failure.value.code not in [http.NOT_FOUND, http.GONE]:
+            failure.trap(ProtocolError, CloudError)
+            http_code = failure.value.code\
+                if isinstance(failure.value, ProtocolError)\
+                else failure.value.args[1]
+            if http_code not in [http.NOT_FOUND, http.GONE]:
                 return failure
             self._list_cache.flush()
             d = self.create()
