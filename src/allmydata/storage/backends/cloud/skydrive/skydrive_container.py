@@ -140,6 +140,22 @@ class DeferredCache(object):
         return ignored
 
 
+class ChunkIDMap(object):
+
+    def __init__(self, path):
+        import anydbm
+        self.path = path
+        self._dbm_module = anydbm
+        self.dbm = anydbm.open(path, 'c')
+
+    def flush(self, ignored=None):
+        self.dbm = self._dbm_module.open(self.path, 'n')
+        return ignored
+
+    def __getitem__(self, k): return self.dbm[k]
+    def __setitem__(self, k, v): self.dbm[k] = v
+
+
 class SkyDriveItem(object):
 
     def __init__(self, key, modification_date, etag, size, storage_class, owner=None):
@@ -182,7 +198,6 @@ class SkyDriveContainer(ContainerRetryMixin):
             access_token=None, refresh_token=None ):
         # Only depend on txskydrive when this class is actually instantiated.
         from txskydrive.api_v5 import txSkyDrivePluggableSync, ProtocolError
-        import anydbm
 
         self.client = txSkyDrivePluggableSync(
             client_id=client_id, client_secret=client_secret, auth_code=auth_code,
@@ -194,8 +209,7 @@ class SkyDriveContainer(ContainerRetryMixin):
         self.folder_id_update_handler = folder_id_update_handler
         self.folder_name = folder_path or folder_id
 
-        self.chunk_idmap_path = mapping_path.path
-        self.chunk_idmap = anydbm.open(mapping_path.path, 'c')
+        self.chunk_idmap = ChunkIDMap(mapping_path.path)
 
         self.ServiceError = ProtocolError
 
@@ -203,9 +217,8 @@ class SkyDriveContainer(ContainerRetryMixin):
         return ("<%s %r>" % (self.__class__.__name__, self.folder_name,))
 
 
-    def ensure_folder(self, folder_path, folder_id):
+    def create_shares_folder(self, folder_path, folder_id):
         from txskydrive.api_v5 import DoesNotExists
-        import anydbm
         d = self._do_request('resolve storage path', self.client.resolve_path, folder_path)
 
         def _match_folder_id(path_info):
@@ -227,7 +240,7 @@ class SkyDriveContainer(ContainerRetryMixin):
 
         def _flush_idmap(failure):
             failure.trap(DoesNotExists)
-            self.chunk_idmap = anydbm.open(self.chunk_idmap_path, 'n')
+            self.chunk_idmap.flush()
             return failure
 
         d.addCallback(_match_folder_id)
@@ -242,14 +255,16 @@ class SkyDriveContainer(ContainerRetryMixin):
     def _create_combinator(self):
         if not self._create_combinator_v:
             self._create_combinator_v = DeferredCache()
-            def _ensure_folder():
-                return self.ensure_folder(self.folder_path, self.folder_id)
+            def _create_folder():
+                return self.create_shares_folder(self.folder_path, self.folder_id)
             self._create_combinator_v.register_update_callback(
-                self._do_request, 'create/check folder', _ensure_folder )
+                self._do_request, 'create/check folder', _create_folder )
         return self._create_combinator_v
 
-    _list_cache_v = None
+    # Cache TTL can be inf if nothing else touches the folder,
+    #  but just to be safe, make sure to refresh it occasionally.
     _list_cache_ttl = 120
+    _list_cache_v = None
     @property
     def _list_cache(self):
         if not self._list_cache_v:
@@ -265,14 +280,12 @@ class SkyDriveContainer(ContainerRetryMixin):
 
     def delete(self):
         d = self._do_request('delete folder', self.client.delete, self.folder_id)
-        def _flush_idmap(ignored):
-            self.chunk_idmap = anydbm.open(self.chunk_idmap_path, 'n')
-        d.addCallback(_flush_idmap)
+        d.addCallback(self.chunk_idmap.flush)
         d.addCallback(self._list_cache.flush)
         return d
 
 
-    def handle_enoent(func):
+    def create_missing_folders(func):
         'Handle missing path errors by checking/creating root folder and trying again.'
         from txskydrive.api_v5 import ProtocolError
         def _enoent_handler(failure, self, args, kwargs):
@@ -296,28 +309,14 @@ class SkyDriveContainer(ContainerRetryMixin):
             return d
         return _wrapper
 
-
-    @handle_enoent
-    def resolve_object_name(self, object_name):
-        try:
-            return defer.succeed(self.chunk_idmap[object_name])
-        except KeyError: pass
-        d = self._do_request( 'resolve object path', self.client.resolve_path,
-            encode_object_name(object_name), root_id=self.folder_id )
-        def _update_idmap(cid):
-            self.chunk_idmap[object_name] = cid
-            return cid
-        d.addCallback(_update_idmap)
-        return d
-
-
-    @handle_enoent
+    @create_missing_folders
     def list_objects(self, prefix=''):
         d = self._list_cache.register_deferred()
         def _filter_objects(lst):
+            # Use this chance to re-populate the chunk_idmap cache
+            self.chunk_idmap.flush()
             contents = list()
             for info in lst:
-                # Use this chance to populate the chunk_idmap cache
                 key = decode_object_name(info['name'])
                 self.chunk_idmap[key] = info['id']
                 if not key.startswith(prefix): continue
@@ -326,7 +325,7 @@ class SkyDriveContainer(ContainerRetryMixin):
         d.addCallback(_filter_objects)
         return d
 
-    @handle_enoent
+    @create_missing_folders
     def put_object(self, object_name, data, content_type=None, metadata={}):
         assert content_type is None, content_type
         assert metadata == {}, metadata
@@ -336,6 +335,15 @@ class SkyDriveContainer(ContainerRetryMixin):
             self.chunk_idmap[object_name] = info['id']
         d.addCallback(_cache_object_id)
         d.addCallback(self._list_cache.flush)
+        return d
+
+
+    def resolve_object_name(self, object_name):
+        try:
+            return defer.succeed(self.chunk_idmap[object_name])
+        except KeyError: pass
+        d = self.list_objects()
+        d.addCallback(lambda ignored: self.chunk_idmap[object_name])
         return d
 
     def get_object(self, object_name):
