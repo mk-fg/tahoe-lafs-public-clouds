@@ -92,7 +92,7 @@ class DeferredCache(object):
 
     _empty = object()
     cache = _empty
-    cache_ttl_flush = None
+    cache_clear_timer = None
     callback = None
     deferred = None
 
@@ -108,7 +108,7 @@ class DeferredCache(object):
             if self.cache_ttl is not None:
                 self.cache = res
                 if self.cache_ttl > 0:
-                    self.cache_ttl_flush = reactor.callLater(self.cache_ttl, self.flush)
+                    self.cache_clear_timer = reactor.callLater(self.cache_ttl, self.clear)
 
     def register_update_callback(self, func, *args, **kwargs):
         self.callback = func, args, kwargs
@@ -126,17 +126,17 @@ class DeferredCache(object):
     def refresh(self):
         if self.deferred: # already in progress
             return self.deferred
-        self.flush()
+        self.clear()
         func, args, kwargs = self.callback
         d = self.deferred = func(*args, **kwargs)
         d.addBoth(self._activate)
 
-    def flush(self, ignored=None):
+    def clear(self, ignored=None):
         self.cache = self._empty
-        if self.cache_ttl_flush:
-            if self.cache_ttl_flush.active():
-                self.cache_ttl_flush.cancel()
-            self.cache_ttl_flush = None
+        if self.cache_clear_timer:
+            if self.cache_clear_timer.active():
+                self.cache_clear_timer.cancel()
+            self.cache_clear_timer = None
         return ignored
 
 
@@ -148,7 +148,7 @@ class ChunkIDMap(object):
         self._dbm_module = anydbm
         self.dbm = anydbm.open(path, 'c')
 
-    def flush(self, ignored=None):
+    def clear(self, ignored=None):
         self.dbm = self._dbm_module.open(self.path, 'n')
         return ignored
 
@@ -238,13 +238,13 @@ class SkyDriveContainer(ContainerRetryMixin):
                 d.addCallback(_create_folder, slug)
             return d
 
-        def _flush_idmap(failure):
+        def _clear_idmap(failure):
             failure.trap(DoesNotExists)
-            self.chunk_idmap.flush()
+            self.chunk_idmap.clear()
             return failure
 
         d.addCallback(_match_folder_id)
-        d.addErrback(_flush_idmap)
+        d.addErrback(_clear_idmap)
         d.addErrback(_folder_lookup_error)
         d.addCallback(_match_folder_id)
         return d
@@ -280,8 +280,8 @@ class SkyDriveContainer(ContainerRetryMixin):
 
     def delete(self):
         d = self._do_request('delete folder', self.client.delete, self.folder_id)
-        d.addCallback(self.chunk_idmap.flush)
-        d.addCallback(self._list_cache.flush)
+        d.addCallback(self.chunk_idmap.clear)
+        d.addCallback(self._list_cache.clear)
         return d
 
 
@@ -295,7 +295,7 @@ class SkyDriveContainer(ContainerRetryMixin):
                 else failure.value.args[1]
             if http_code not in [http.NOT_FOUND, http.GONE]:
                 return failure
-            self._list_cache.flush()
+            self._list_cache.clear()
             d = self.create()
             d.addCallback(lambda ignored: func(self, *args, **kwargs))
             return d
@@ -314,7 +314,7 @@ class SkyDriveContainer(ContainerRetryMixin):
         d = self._list_cache.register_deferred()
         def _filter_objects(lst):
             # Use this chance to re-populate the chunk_idmap cache
-            self.chunk_idmap.flush()
+            self.chunk_idmap.clear()
             contents = list()
             for info in lst:
                 key = decode_object_name(info['name'])
@@ -334,7 +334,7 @@ class SkyDriveContainer(ContainerRetryMixin):
         def _cache_object_id(info):
             self.chunk_idmap[object_name] = info['id']
         d.addCallback(_cache_object_id)
-        d.addCallback(self._list_cache.flush)
+        d.addCallback(self._list_cache.clear)
         return d
 
 
@@ -360,5 +360,5 @@ class SkyDriveContainer(ContainerRetryMixin):
     def delete_object(self, object_name):
         d = self.resolve_object_name(object_name)
         d.addCallback(lambda cid: self._do_request('DELETE object', self.client.delete, cid))
-        d.addCallback(self._list_cache.flush)
+        d.addCallback(self._list_cache.clear)
         return d
