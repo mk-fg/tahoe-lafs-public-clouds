@@ -43,6 +43,7 @@ def configure_skydrive_container(storedir, config):
     refresh_token = config.get_optional_private_config("skydrive_refresh_token")
 
     api_url = config.get_config("storage", "skydrive.api_url", "https://apis.live.net/v5.0/")
+    api_debug = config.get_config("storage", "skydrive.api_debug", False, boolean=True)
     folder_id = config.get_config("storage", "skydrive.folder_id", None)
     folder_path = config.get_config("storage", "skydrive.folder_path", None)
 
@@ -73,7 +74,8 @@ def configure_skydrive_container(storedir, config):
         client_id, client_secret, auth_code, mapping_path,
         token_update_handler=token_update_handler,
         folder_id_update_handler=folder_id_update_handler,
-        access_token=access_token, refresh_token=refresh_token )
+        access_token=access_token, refresh_token=refresh_token,
+        api_debug=api_debug )
 
     return container
 
@@ -195,14 +197,16 @@ class SkyDriveContainer(ContainerRetryMixin):
             client_id, client_secret, auth_code, mapping_path,
             token_update_handler=None,
             folder_id_update_handler=None,
-            access_token=None, refresh_token=None ):
+            access_token=None, refresh_token=None,
+            api_debug=False ):
         # Only depend on txskydrive when this class is actually instantiated.
         from txskydrive.api_v5 import txSkyDrivePluggableSync, ProtocolError
 
         self.client = txSkyDrivePluggableSync(
             client_id=client_id, client_secret=client_secret, auth_code=auth_code,
             auth_access_token=access_token, auth_refresh_token=refresh_token,
-            api_url_base=api_url, config_update_callback=token_update_handler )
+            config_update_callback=token_update_handler,
+            api_url_base=api_url, debug_requests=api_debug )
 
         self.folder_path = normpath(folder_path).lstrip('/')
         self.folder_id = folder_id
