@@ -1,5 +1,6 @@
 
 from os.path import basename, dirname, normpath, join
+from datetime import datetime
 import re
 
 from zope.interface import implements
@@ -58,8 +59,6 @@ def configure_skydrive_container(storedir, config):
     else:
         folder_id_created = False
 
-    mapping_path = storedir.child("skydrive_idmap.db")
-
     def token_update_handler(auth_access_token, auth_refresh_token, **kwargs):
         config.write_private_config("skydrive_access_token", auth_access_token)
         config.write_private_config("skydrive_refresh_token", auth_refresh_token)
@@ -71,7 +70,7 @@ def configure_skydrive_container(storedir, config):
         config.write_private_config("skydrive_folder_id", folder_id)
 
     container = SkyDriveContainer( api_url, folder_id, folder_path,
-        client_id, client_secret, auth_code, mapping_path,
+        client_id, client_secret, auth_code,
         token_update_handler=token_update_handler,
         folder_id_update_handler=folder_id_update_handler,
         access_token=access_token, refresh_token=refresh_token,
@@ -103,14 +102,17 @@ class DeferredCache(object):
         self.cache_ttl = cache_ttl
 
     def _activate(self, res):
-        self.deferred = None
-        for d in self.listeners: d.callback(res)
+        self.deferred, self.cache = None, res
+        listeners = list(self.listeners) # might get updated in callbacks
         self.listeners.clear()
-        if not isinstance(res, Failure):
+        for d in listeners:
+            if not d.called: d.callback(res)
+        if not self.deferred and not isinstance(res, Failure):
             if self.cache_ttl is not None:
                 self.cache = res
                 if self.cache_ttl > 0:
                     self.cache_clear_timer = reactor.callLater(self.cache_ttl, self.clear)
+            else: self.cache = self._empty
 
     def register_update_callback(self, func, *args, **kwargs):
         self.callback = func, args, kwargs
@@ -126,12 +128,12 @@ class DeferredCache(object):
         return d
 
     def refresh(self):
-        if self.deferred: # already in progress
-            return self.deferred
+        if self.deferred: return self.deferred # already in progress
         self.clear()
         func, args, kwargs = self.callback
         d = self.deferred = func(*args, **kwargs)
         d.addBoth(self._activate)
+        return self.register_deferred()
 
     def clear(self, ignored=None):
         self.cache = self._empty
@@ -142,49 +144,106 @@ class DeferredCache(object):
         return ignored
 
 
-class ChunkIDMap(object):
-
-    def __init__(self, path):
-        import anydbm
-        self.path = path
-        self._dbm_module = anydbm
-        self.dbm = anydbm.open(path, 'c')
-
-    def clear(self, ignored=None):
-        self.dbm = self._dbm_module.open(self.path, 'n')
-        return ignored
-
-    def __getitem__(self, k): return self.dbm[k]
-    def __setitem__(self, k, v): self.dbm[k] = v
-
 
 class SkyDriveItem(object):
 
-    def __init__(self, key, modification_date, etag, size, storage_class, owner=None):
-        self.key = key
-        self.modification_date = modification_date
-        self.etag = etag
-        self.size = size
-        self.storage_class = storage_class
-        self.owner = owner
+    metadata_keys = 'key', 'modification_date', 'etag', 'size', 'storage_class', 'owner'
 
-    @classmethod
-    def from_info(cls, info, key=None):
-        key = key or decode_object_name(info['name'])
-        etag = sha1('\0'.join([info['id'], info['name'], info['updated_time']])).hexdigest()
-        return cls(key, info['updated_time'], etag, info['size'], 'STANDARD', None)
+    storage_class = 'STANDARD'
+    etag = None
+    owner = None
+
+    def __init__(self, info, key, backend_id):
+        self.key = key or decode_object_name(info['name'])
+        self.modification_date = info['updated_time']
+        self.size = info['size']
+        self.backend_id = backend_id
 
 class SkyDriveListing(object):
 
-    def __init__( self, name, prefix, marker, max_keys,
-            is_truncated, contents=None, common_prefixes=None ):
+    metadata_keys = 'name', 'prefix', 'marker',\
+        'max_keys', 'is_truncated', 'contents', 'common_prefixes'
+
+    prefix = ''
+    marker = ''
+    max_keys = 2**30
+    is_truncated = 'false'
+
+    def __init__(self, name, contents):
         self.name = name
-        self.prefix = prefix
-        self.marker = marker
-        self.max_keys = max_keys
-        self.is_truncated = is_truncated
         self.contents = contents
-        self.common_prefixes = common_prefixes
+
+
+class SkyDriveMetadata(DeferredCache):
+
+    def __init__(self, cache_ttl=None):
+        self._idmap = dict()
+        super(SkyDriveMetadata, self).__init__(cache_ttl=cache_ttl)
+
+
+    def _add_object(self, cache, info, key=None):
+        key = key or decode_object_name(info['name'])
+        backend_id = info['id']
+        self._idmap[key] = backend_id
+        cache[backend_id] = SkyDriveItem(info, key=key, backend_id=backend_id)
+
+    def _remove_object(self, cache, key=None, backend_id=None):
+        assert not (key and backend_id)
+        if backend_id: key = cache[backend_id].key
+        else: backend_id = self._idmap[key]
+        del self._idmap[key], cache[backend_id]
+
+    def _update_listdir(self, lst):
+        self._idmap.clear()
+        contents = dict()
+        for info in lst: self._add_object(contents, info)
+        return contents
+
+    def update_listdir(self):
+        func, args, kwargs = self._callback
+        return func(*args, **kwargs).addCallback(self._update_listdir)
+
+    def register_update_callback(self, func, *args, **kwargs):
+        self._callback = func, args, kwargs
+        super(SkyDriveMetadata, self).register_update_callback(self.update_listdir)
+
+
+    def enumerate(self, name, prefix):
+        d = self.register_deferred()
+        def _filter_contents(contents):
+            contents = list( obj
+                for obj in contents.viewvalues()
+                if obj.key.startswith(prefix) )
+            return SkyDriveListing(name, contents)
+        d.addCallback(_filter_contents)
+        return d
+
+    def get(self, key):
+        d = self.register_deferred()
+        def _get_object(contents, try_refresh=True):
+            try: backend_id = self._idmap[key]
+            except KeyError:
+                if not try_refresh: raise
+                log.msg( 'Detected inconsistency between cached list of'
+                    ' share chunks and requested ones (missing files in the'
+                    ' cloud?), trying to refresh list of remote shares.', level=log.WEIRD )
+                d = self.refresh()
+                d.addCallback(_get_object, try_refresh=False)
+                return d
+            return contents[backend_id]
+        d.addCallback(_get_object)
+        return d
+
+    def add(self, info, key=None):
+        d = self.register_deferred()
+        d.addCallback(self._add_object, info, key=key)
+        return d
+
+    def remove(self, key):
+        d = self.register_deferred()
+        d.addCallback(self._remove_object, key=key)
+        return d
+
 
 
 class SkyDriveContainer(ContainerRetryMixin):
@@ -194,7 +253,7 @@ class SkyDriveContainer(ContainerRetryMixin):
     """
 
     def __init__( self, api_url, folder_id, folder_path,
-            client_id, client_secret, auth_code, mapping_path,
+            client_id, client_secret, auth_code,
             token_update_handler=None,
             folder_id_update_handler=None,
             access_token=None, refresh_token=None,
@@ -213,7 +272,11 @@ class SkyDriveContainer(ContainerRetryMixin):
         self.folder_id_update_handler = folder_id_update_handler
         self.folder_name = folder_path or folder_id
 
-        self.chunk_idmap = ChunkIDMap(mapping_path.path)
+        # Cache TTL can be inf if nothing else touches the folder,
+        #  but just to be safe, make sure to refresh it occasionally.
+        self.folder = SkyDriveMetadata(cache_ttl=3600)
+        self.folder.register_update_callback( self._do_request,
+            'list objects', self.client.listdir, self.folder_id, type_filter='file' )
 
         self.ServiceError = ProtocolError
 
@@ -230,6 +293,8 @@ class SkyDriveContainer(ContainerRetryMixin):
             if folder_path_id != folder_id:
                 self.folder_id_update_handler(folder_path_id)
                 self.folder_id = folder_path_id
+                self.folder.register_update_callback( self._do_request,
+                    'list objects', self.client.listdir, self.folder_id, type_filter='file' )
 
         def _create_folder(parent_info, name):
             return self._do_request('mkdir', self.client.mkdir, name, parent_info['id'])
@@ -242,13 +307,8 @@ class SkyDriveContainer(ContainerRetryMixin):
                 d.addCallback(_create_folder, slug)
             return d
 
-        def _clear_idmap(failure):
-            failure.trap(DoesNotExists)
-            self.chunk_idmap.clear()
-            return failure
-
         d.addCallback(_match_folder_id)
-        d.addErrback(_clear_idmap)
+        d.addErrback(self.folder.clear)
         d.addErrback(_folder_lookup_error)
         d.addCallback(_match_folder_id)
         return d
@@ -265,26 +325,12 @@ class SkyDriveContainer(ContainerRetryMixin):
                 self._do_request, 'create/check folder', _create_folder )
         return self._create_combinator_v
 
-    # Cache TTL can be inf if nothing else touches the folder,
-    #  but just to be safe, make sure to refresh it occasionally.
-    _list_cache_ttl = 120
-    _list_cache_v = None
-    @property
-    def _list_cache(self):
-        if not self._list_cache_v:
-            self._list_cache_v = DeferredCache(cache_ttl=self._list_cache_ttl)
-            def _listdir():
-                return self.client.listdir(self.folder_id, type_filter='file')
-            self._list_cache_v.register_update_callback(self._do_request, 'list objects', _listdir)
-        return self._list_cache_v
-
-
     def create(self):
         return self._create_combinator.register_deferred()
 
     def delete(self):
         d = self._do_request('delete folder', self.client.delete, self.folder_id)
-        d.addCallback(self.chunk_idmap.clear)
+        d.addCallback(self.folder.clear)
         d.addCallback(self._list_cache.clear)
         return d
 
@@ -313,58 +359,50 @@ class SkyDriveContainer(ContainerRetryMixin):
             return d
         return _wrapper
 
+
     @create_missing_folders
     def list_objects(self, prefix=''):
-        d = self._list_cache.register_deferred()
-        def _filter_objects(lst):
-            # Use this chance to re-populate the chunk_idmap cache
-            self.chunk_idmap.clear()
-            contents = list()
-            for info in lst:
-                key = decode_object_name(info['name'])
-                self.chunk_idmap[key] = info['id']
-                if not key.startswith(prefix): continue
-                contents.append(SkyDriveItem.from_info(info, key=key))
-            return SkyDriveListing(self.folder_name, '', '', 1000, 'false', contents, None)
-        d.addCallback(_filter_objects)
-        return d
+        return self.folder.enumerate(self.folder_name, prefix)
 
     @create_missing_folders
     def put_object(self, object_name, data, content_type=None, metadata={}):
         assert content_type is None, content_type
         assert metadata == {}, metadata
+
         # Rearrange arguments, so (potentially large) data won't end up in the logs
         d = self._do_request( 'PUT object',
             lambda name, dst, data: self.client.put((name, data), dst),
             encode_object_name(object_name), self.folder_id, data )
-        def _cache_object_id(info):
-            self.chunk_idmap[object_name] = info['id']
-        d.addCallback(_cache_object_id)
-        d.addCallback(self._list_cache.clear)
+
+        # Returned info dict lacks some metadata keys, used in SkyDriveItem,
+        #  which can be acquired properly via folder.get(), but is simple enough
+        #  to fill it in right here
+        def _extend_info(info):
+            info['size'] = len(data)
+            info['updated_time'] = datetime.utcnow().isoformat()
+            return info
+        d.addCallback(_extend_info)
+
+        d.addCallback(self.folder.add, object_name)
         return d
 
 
-    def resolve_object_name(self, object_name):
-        try:
-            return defer.succeed(self.chunk_idmap[object_name])
-        except KeyError: pass
-        d = self.list_objects()
-        d.addCallback(lambda ignored: self.chunk_idmap[object_name])
+    def resolve_object_name(func):
+        def _wrapper(self, key):
+            d = self.folder.get(key)
+            d.addCallback(lambda obj: func(self, key, obj.backend_id))
+            return d
+        return _wrapper
+
+    @resolve_object_name
+    def get_object(self, key, backend_id):
+        return self._do_request('GET object', self.client.get, backend_id)
+
+    @resolve_object_name
+    def delete_object(self, key, backend_id):
+        d = self._do_request('DELETE object', self.client.delete, backend_id)
+        d.addCallback(lambda ignored: self.folder.remove(key))
         return d
 
-    def get_object(self, object_name):
-        d = self.resolve_object_name(object_name)
-        d.addCallback(lambda cid: self._do_request('GET object', self.client.get, cid))
-        return d
-
-    def head_object(self, object_name):
-        d = self.resolve_object_name(object_name)
-        d.addCallback(lambda cid: self._do_request('HEAD object', self.client.info, cid))
-        d.addCallback(SkyDriveItem.from_info)
-        return d
-
-    def delete_object(self, object_name):
-        d = self.resolve_object_name(object_name)
-        d.addCallback(lambda cid: self._do_request('DELETE object', self.client.delete, cid))
-        d.addCallback(self._list_cache.clear)
-        return d
+    def head_object(self, key):
+        return self.folder.get(key)
