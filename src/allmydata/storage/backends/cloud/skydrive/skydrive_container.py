@@ -333,8 +333,10 @@ class SkyDriveContainer(ContainerRetryMixin):
     def put_object(self, object_name, data, content_type=None, metadata={}):
         assert content_type is None, content_type
         assert metadata == {}, metadata
-        d = self._do_request( 'PUT object', self.client.put,
-            (encode_object_name(object_name), data), self.folder_id )
+        # Rearrange arguments, so (potentially large) data won't end up in the logs
+        d = self._do_request( 'PUT object',
+            lambda name, dst, data: self.client.put((name, data), dst),
+            encode_object_name(object_name), self.folder_id, data )
         def _cache_object_id(info):
             self.chunk_idmap[object_name] = info['id']
         d.addCallback(_cache_object_id)
