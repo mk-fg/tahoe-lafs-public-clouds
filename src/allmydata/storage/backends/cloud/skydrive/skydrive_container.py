@@ -102,9 +102,14 @@ class SkyDriveItem(object):
     etag = None
     owner = None
 
-    def __init__(self, info, key):
-        self.key = key or decode_key(info['name'])
-        self.size, self.modification_date = info['size'], info['updated_time']
+    backend_id = None
+
+    def __init__(self, info, **kwz):
+        self.key = kwz.pop('key', None) or decode_key(info['name'])
+        self.backend_id = kwz.pop('backend_id', None) or info['id']
+        self.modification_date = kwz.pop('modification_date', None) or info['updated_time']
+        self.size = kwz.pop('size', None) or info['size']
+        for k, v in kwz.viewitems(): setattr(self, k, v)
 
 
 class SkyDriveListing(object):
@@ -231,12 +236,13 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
             chunk_list, self._folds = yield self._crawl()
             chunks = dict()
             for info in chunk_list:
-                chunks[info['id']] = chunks[decode_key(info['name'])] = info
+                key = decode_key(info['name'])
+                chunks[info['id']] = chunks[key] = SkyDriveItem(info, key=key)
             self._chunks = chunks
         defer.returnValue(
             SkyDriveListing(self.folder_name, prefix, list(
-                SkyDriveItem(info, key) for key, info in
-                    self._chunks.viewitems() if prefix and key.startswith(prefix) )) )
+                item for key, item in self._chunks.viewitems()
+                if prefix and key.startswith(prefix) )) )
 
 
     @defer.inlineCallbacks
@@ -258,17 +264,17 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
 
         info['size'] = len(data)
         info['updated_time'] = datetime.utcnow().isoformat()
-        self._chunks[info['id']] = self._chunks[key] = info
+        self._chunks[info['id']] = self._chunks[key] = SkyDriveItem(info, key=key)
 
     @defer.inlineCallbacks
     def delete_object(self, key):
-        chunk_id = self._chunks[key]['id']
+        chunk_id = self._chunks[key].backend_id
         yield self._do_request('delete', self.client.delete, chunk_id)
         del self._chunks[key], self._chunks[chunk_id]
 
 
     def get_object(self, key):
-        return self._do_request('get', self.client.get, self._chunks[key]['id'])
+        return self._do_request('get', self.client.get, self._chunks[key].backend_id)
 
     def head_object(self, key):
-        return SkyDriveItem(self._chunks[key], key)
+        return self._chunks[key]
