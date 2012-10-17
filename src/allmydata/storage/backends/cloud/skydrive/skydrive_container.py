@@ -1,17 +1,17 @@
+#-*- coding: utf-8 -*-
 
-from os.path import basename, dirname, normpath, join
+import itertools as it, operator as op, functools as ft
 from datetime import datetime
+from collections import deque
 import re
 
 from zope.interface import implements
-from twisted.internet import reactor, defer
+from twisted.internet import reactor, defer, task
 from twisted.web import http
-from twisted.python.failure import Failure
 
 from allmydata.node import InvalidValueError, MissingConfigEntry
-from allmydata.storage.backends.cloud.cloud_common import IContainer, \
-     ContainerRetryMixin, ContainerListMixin, CloudError
-from allmydata.util.hashutil import sha1
+from allmydata.storage.backends.cloud.cloud_common import\
+    IContainer, ContainerRetryMixin, CloudError
 from allmydata.util import log
 
 
@@ -80,177 +80,67 @@ def configure_skydrive_container(storedir, config):
 
 
 
-def encode_object_name(name):
-    return name.replace('_', '__').replace('/', '_')
+class RateLimitMixin(object):
 
-def decode_object_name(name_enc):
-    if isinstance(name_enc, unicode):
-        name_enc = name_enc.encode('utf-8')
-    return '__'.join(c.replace('_', '/') for c in name_enc.split('__'))
+    def __init__(self, interval, burst):
+        self.bucket = defer.DeferredQueue(burst, backlog=None)
+        def _put_token(bucket=self.bucket):
+            try: bucket.put(None)
+            except defer.QueueOverflow: pass
+        task.LoopingCall(_put_token).start(interval, now=False)
 
-
-class DeferredCache(object):
-
-    _empty = object()
-    cache = _empty
-    cache_clear_timer = None
-    callback = None
-    deferred = None
-
-    def __init__(self, cache_ttl=None):
-        self.listeners = set()
-        self.cache_ttl = cache_ttl
-
-    def _activate(self, res):
-        self.deferred, self.cache = None, res
-        listeners = list(self.listeners) # might get updated in callbacks
-        self.listeners.clear()
-        for d in listeners:
-            if not d.called: d.callback(res)
-        if not self.deferred and not isinstance(res, Failure):
-            if self.cache_ttl is not None:
-                self.cache = res
-                if self.cache_ttl > 0:
-                    self.cache_clear_timer = reactor.callLater(self.cache_ttl, self.clear)
-            else: self.cache = self._empty
-
-    def register_update_callback(self, func, *args, **kwargs):
-        self.callback = func, args, kwargs
-
-    def register_deferred(self, d=None):
-        if self.cache is not self._empty:
-            if not d: d = defer.succeed(self.cache)
-            else: d.callback(self.cache)
-            return d
-        if not self.deferred: self.refresh()
-        if not d: d = defer.Deferred()
-        self.listeners.add(d)
-        return d
-
-    def refresh(self):
-        if self.deferred: return self.deferred # already in progress
-        self.clear()
-        func, args, kwargs = self.callback
-        d = self.deferred = func(*args, **kwargs)
-        d.addBoth(self._activate)
-        return self.register_deferred()
-
-    def clear(self, ignored=None):
-        self.cache = self._empty
-        if self.cache_clear_timer:
-            if self.cache_clear_timer.active():
-                self.cache_clear_timer.cancel()
-            self.cache_clear_timer = None
-        return ignored
+    def _do_request(self, *args, **kwargs):
+        return self.bucket.get().addCallback(
+            lambda ignored: super(RateLimitMixin, self)._do_request(*args, **kwargs) )
 
 
 
 class SkyDriveItem(object):
-
-    metadata_keys = 'key', 'modification_date', 'etag', 'size', 'storage_class', 'owner'
+    # 'key', 'modification_date', 'etag', 'size', 'storage_class', 'owner'
 
     storage_class = 'STANDARD'
     etag = None
     owner = None
 
-    def __init__(self, info, key, backend_id):
-        self.key = key or decode_object_name(info['name'])
-        self.modification_date = info['updated_time']
-        self.size = info['size']
-        self.backend_id = backend_id
+    def __init__(self, info, key):
+        self.key = key or decode_key(info['name'])
+        self.size, self.modification_date = info['size'], info['updated_time']
+
 
 class SkyDriveListing(object):
+    # 'name', 'prefix', 'marker', 'max_keys',
+    #  'is_truncated', 'contents', 'common_prefixes'
 
-    metadata_keys = 'name', 'prefix', 'marker',\
-        'max_keys', 'is_truncated', 'contents', 'common_prefixes'
-
-    prefix = ''
     marker = ''
     max_keys = 2**30
     is_truncated = 'false'
 
-    def __init__(self, name, contents):
-        self.name = name
-        self.contents = contents
-
-
-class SkyDriveMetadata(DeferredCache):
-
-    def __init__(self, cache_ttl=None):
-        self._idmap = dict()
-        super(SkyDriveMetadata, self).__init__(cache_ttl=cache_ttl)
-
-
-    def _add_object(self, cache, info, key=None):
-        key = key or decode_object_name(info['name'])
-        backend_id = info['id']
-        self._idmap[key] = backend_id
-        cache[backend_id] = SkyDriveItem(info, key=key, backend_id=backend_id)
-
-    def _remove_object(self, cache, key=None, backend_id=None):
-        assert not (key and backend_id)
-        if backend_id: key = cache[backend_id].key
-        else: backend_id = self._idmap[key]
-        del self._idmap[key], cache[backend_id]
-
-    def _update_listdir(self, lst):
-        self._idmap.clear()
-        contents = dict()
-        for info in lst: self._add_object(contents, info)
-        return contents
-
-    def update_listdir(self):
-        func, args, kwargs = self._callback
-        return func(*args, **kwargs).addCallback(self._update_listdir)
-
-    def register_update_callback(self, func, *args, **kwargs):
-        self._callback = func, args, kwargs
-        super(SkyDriveMetadata, self).register_update_callback(self.update_listdir)
-
-
-    def enumerate(self, name, prefix):
-        d = self.register_deferred()
-        def _filter_contents(contents):
-            contents = list( obj
-                for obj in contents.viewvalues()
-                if obj.key.startswith(prefix) )
-            return SkyDriveListing(name, contents)
-        d.addCallback(_filter_contents)
-        return d
-
-    def get(self, key):
-        d = self.register_deferred()
-        def _get_object(contents, try_refresh=True):
-            try: backend_id = self._idmap[key]
-            except KeyError:
-                if not try_refresh: raise
-                log.msg( 'Detected inconsistency between cached list of'
-                    ' share chunks and requested ones (missing files in the'
-                    ' cloud?), trying to refresh list of remote shares.', level=log.WEIRD )
-                d = self.refresh()
-                d.addCallback(_get_object, try_refresh=False)
-                return d
-            return contents[backend_id]
-        d.addCallback(_get_object)
-        return d
-
-    def add(self, info, key=None):
-        d = self.register_deferred()
-        d.addCallback(self._add_object, info, key=key)
-        return d
-
-    def remove(self, key):
-        d = self.register_deferred()
-        d.addCallback(self._remove_object, key=key)
-        return d
+    def __init__(self, name, prefix, contents):
+        self.name, self.prefix, self.contents = name, prefix, contents
 
 
 
-class SkyDriveContainer(ContainerRetryMixin):
+def fjoin(*slugs):
+    return '/'.join(it.ifilter( None,
+        it.chain.from_iterable(slug.split('/') for slug in slugs) ))
+
+def key_split(key):
+    # shares/$PREFIX/$STORAGEINDEX/$SHNUM.$CHUNK
+    static, prefix, idx, chunk = it.ifilter(None, key.split('/'))
+    return fjoin(static, prefix), fjoin(idx, chunk)
+
+def encode_key(key):
+    return key.replace('_', '__').replace('/', '_')
+
+def decode_key(key_enc):
+    if isinstance(key_enc, unicode):
+        key_enc = key_enc.encode('utf-8')
+    return '__'.join(c.replace('_', '/') for c in key_enc.split('__'))
+
+
+
+class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
     implements(IContainer)
-    """
-    I represent SkyDrive container (folder), accessed using the txskydrive module.
-    """
 
     def __init__( self, api_url, folder_id, folder_path,
             client_id, client_secret, auth_code,
@@ -259,7 +149,7 @@ class SkyDriveContainer(ContainerRetryMixin):
             access_token=None, refresh_token=None,
             api_debug=False ):
         # Only depend on txskydrive when this class is actually instantiated.
-        from txskydrive.api_v5 import txSkyDrivePluggableSync, ProtocolError
+        from txskydrive.api_v5 import txSkyDrivePluggableSync, ProtocolError, DoesNotExists
 
         self.client = txSkyDrivePluggableSync(
             client_id=client_id, client_secret=client_secret, auth_code=auth_code,
@@ -267,142 +157,118 @@ class SkyDriveContainer(ContainerRetryMixin):
             config_update_callback=token_update_handler,
             api_url_base=api_url, debug_requests=api_debug )
 
-        self.folder_path = normpath(folder_path).lstrip('/')
+        self.folder_path = folder_path
         self.folder_id = folder_id
         self.folder_id_update_handler = folder_id_update_handler
         self.folder_name = folder_path or folder_id
 
-        # Cache TTL can be inf if nothing else touches the folder,
-        #  but just to be safe, make sure to refresh it occasionally.
-        self.folder = SkyDriveMetadata(cache_ttl=3600)
-        self.folder.register_update_callback( self._do_request,
-            'list objects', self.client.listdir, self.folder_id, type_filter='file' )
-
+        self.ProtocolError, self.DoesNotExists = ProtocolError, DoesNotExists
         self.ServiceError = ProtocolError
+        super(SkyDriveContainer, self).__init__(interval=10, burst=10)
+
 
     def __repr__(self):
-        return ("<%s %r>" % (self.__class__.__name__, self.folder_name,))
+        return '<{} {!r}>'.format(self.__class__.__name__, self.folder_name)
 
 
-    def create_shares_folder(self, folder_path, folder_id):
-        from txskydrive.api_v5 import DoesNotExists
-        d = self._do_request('resolve storage path', self.client.resolve_path, folder_path)
+    @defer.inlineCallbacks
+    def _mkdir(self, path=''):
+        if path: kwz = dict(root_id=self.folder_id)
+        else: kwz, path = dict(), self.folder_name
+        try:
+            defer.returnValue((yield self._do_request(
+                'check path components', self.client.resolve_path, path, **kwz )))
+        except self.DoesNotExists as err:
+            parent_id, slugs = err.args
+            for slug in slugs:
+                parent_id = (yield self._do_request(
+                    'mkdir', self.client.mkdir, slug, parent_id ))['id']
+            defer.returnValue(parent_id)
 
-        def _match_folder_id(path_info):
-            folder_path_id = path_info['id']
-            if folder_path_id != folder_id:
-                self.folder_id_update_handler(folder_path_id)
-                self.folder_id = folder_path_id
-                self.folder.register_update_callback( self._do_request,
-                    'list objects', self.client.listdir, self.folder_id, type_filter='file' )
+    @defer.inlineCallbacks
+    def _mkdir_wrapper(self, func, path=''):
+        try: defer.returnValue((yield defer.maybeDeferred(func)))
+        except self.ProtocolError as err: http_code = err.code
+        except CloudError as err: http_code = err.args[1]
+        if http_code not in [http.NOT_FOUND, http.GONE]: raise
+        self.folder_id = yield self._mkdir()
+        self.folder_id_update_handler(self.folder_id)
+        yield self._mkdir(path)
+        defer.returnValue((yield defer.maybeDeferred(func)))
 
-        def _create_folder(parent_info, name):
-            return self._do_request('mkdir', self.client.mkdir, name, parent_info['id'])
-
-        def _folder_lookup_error(failure):
-            failure.trap(DoesNotExists)
-            parent_id, slugs = failure.value.args
-            d = _create_folder(dict(id=parent_id), slugs[0])
-            for slug in slugs[1:]:
-                d.addCallback(_create_folder, slug)
-            return d
-
-        d.addCallback(_match_folder_id)
-        d.addErrback(self.folder.clear)
-        d.addErrback(_folder_lookup_error)
-        d.addCallback(_match_folder_id)
-        return d
-
-
-    _create_combinator_v = None
-    @property
-    def _create_combinator(self):
-        if not self._create_combinator_v:
-            self._create_combinator_v = DeferredCache()
-            def _create_folder():
-                return self.create_shares_folder(self.folder_path, self.folder_id)
-            self._create_combinator_v.register_update_callback(
-                self._do_request, 'create/check folder', _create_folder )
-        return self._create_combinator_v
 
     def create(self):
-        return self._create_combinator.register_deferred()
+        return self._mkdir()
 
+    @defer.inlineCallbacks
     def delete(self):
-        d = self._do_request('delete folder', self.client.delete, self.folder_id)
-        d.addCallback(self.folder.clear)
-        d.addCallback(self._list_cache.clear)
-        return d
+        yield self._do_request(
+            'delete root', self.client.delete, self.folder_id )
+        self._chunks.clear()
+        self._folds.clear()
 
 
-    def create_missing_folders(func):
-        'Handle missing path errors by checking/creating root folder and trying again.'
-        from txskydrive.api_v5 import ProtocolError
-        def _enoent_handler(failure, self, args, kwargs):
-            failure.trap(ProtocolError, CloudError)
-            http_code = failure.value.code\
-                if isinstance(failure.value, ProtocolError)\
-                else failure.value.args[1]
-            if http_code not in [http.NOT_FOUND, http.GONE]:
-                return failure
-            self._list_cache.clear()
-            d = self.create()
-            d.addCallback(lambda ignored: func(self, *args, **kwargs))
-            return d
-        def _wrapper(self, *args, **kwargs):
-            if not self.folder_id:
-                d = self.create()
-                d.addCallback(lambda ignored: func(self, *args, **kwargs))
-            else:
-                d = func(self, *args, **kwargs)
-                d.addErrback(_enoent_handler, self, args, kwargs)
-            return d
-        return _wrapper
+    _chunks = None # {file_id1: info1, file_key1: info1, ...}
+    _folds = None # {fold: folder_id, ...}
 
+    @defer.inlineCallbacks
+    def _crawl(self):
+        chunks, folds = list(), {'': self.folder_id}
+        lst = deque( ('', info) for info in (yield self._mkdir_wrapper(
+            lambda: self._do_request('list root', self.client.listdir, self.folder_id) )) )
+        while lst:
+            fold, info = lst.popleft()
+            if info['type'] == 'folder':
+                folds[fjoin(fold, info['name'])] = info['id']
+                lst.extend( (fjoin(fold, info['name'], ci['name']), ci)
+                    for ci in (yield self._do_request('listdir', self.client.listdir, info['id'])) )
+            else: chunks.append(info)
+        defer.returnValue((chunks, folds))
 
-    @create_missing_folders
+    @defer.inlineCallbacks
     def list_objects(self, prefix=''):
-        return self.folder.enumerate(self.folder_name, prefix)
-
-    @create_missing_folders
-    def put_object(self, object_name, data, content_type=None, metadata={}):
-        assert content_type is None, content_type
-        assert metadata == {}, metadata
-
-        # Rearrange arguments, so (potentially large) data won't end up in the logs
-        d = self._do_request( 'PUT object',
-            lambda name, dst, data: self.client.put((name, data), dst),
-            encode_object_name(object_name), self.folder_id, data )
-
-        # Returned info dict lacks some metadata keys, used in SkyDriveItem,
-        #  which can be acquired properly via folder.get(), but is simple enough
-        #  to fill it in right here
-        def _extend_info(info):
-            info['size'] = len(data)
-            info['updated_time'] = datetime.utcnow().isoformat()
-            return info
-        d.addCallback(_extend_info)
-
-        d.addCallback(self.folder.add, object_name)
-        return d
+        if not self._chunks:
+            chunk_list, self._folds = yield self._crawl()
+            chunks = dict()
+            for info in chunk_list:
+                chunks[info['id']] = chunks[decode_key(info['name'])] = info
+            self._chunks = chunks
+        defer.returnValue(
+            SkyDriveListing(self.folder_name, prefix, list(
+                SkyDriveItem(info, key) for key, info in
+                    self._chunks.viewitems() if prefix and key.startswith(prefix) )) )
 
 
-    def resolve_object_name(func):
-        def _wrapper(self, key):
-            d = self.folder.get(key)
-            d.addCallback(lambda obj: func(self, key, obj.backend_id))
-            return d
-        return _wrapper
+    @defer.inlineCallbacks
+    def put_object(self, key, data, content_type=None, metadata=None):
+        assert not content_type, content_type
+        assert not metadata, metadata
 
-    @resolve_object_name
-    def get_object(self, key, backend_id):
-        return self._do_request('GET object', self.client.get, backend_id)
+        fold, name = key_split(key)
+        @defer.inlineCallbacks
+        def _upload_chunk():
+            for fail in xrange(2):
+                try:
+                    defer.returnValue((yield self._do_request( 'upload',
+                        self.client.put, (encode_key(key), data), self._folds[fold] )))
+                except KeyError:
+                    if fail: raise
+                    self._folds[fold] = yield self._mkdir(fold)
+        info = yield self._mkdir_wrapper(_upload_chunk, fold)
 
-    @resolve_object_name
-    def delete_object(self, key, backend_id):
-        d = self._do_request('DELETE object', self.client.delete, backend_id)
-        d.addCallback(lambda ignored: self.folder.remove(key))
-        return d
+        info['size'] = len(data)
+        info['updated_time'] = datetime.utcnow().isoformat()
+        self._chunks[info['id']] = self._chunks[key] = info
+
+    @defer.inlineCallbacks
+    def delete_object(self, key):
+        chunk_id = self._chunks[key]['id']
+        yield self._do_request('delete', self.client.delete, chunk_id)
+        del self._chunks[key], self._chunks[chunk_id]
+
+
+    def get_object(self, key):
+        return self._do_request('get', self.client.get, self._chunks[key]['id'])
 
     def head_object(self, key):
-        return self.folder.get(key)
+        return SkyDriveItem(self._chunks[key], key)
