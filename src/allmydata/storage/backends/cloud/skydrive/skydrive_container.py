@@ -44,11 +44,23 @@ def configure_skydrive_container(storedir, config):
     access_token = config.get_optional_private_config("skydrive_access_token")
     refresh_token = config.get_optional_private_config("skydrive_refresh_token")
 
-    api_url = config.get_config("storage", "skydrive.api_url", "https://apis.live.net/v5.0/")
-    api_debug = config.get_config("storage", "skydrive.api_debug", False, boolean=True)
+    api_parameters = dict(
+        url = config.get_config("storage", "skydrive.api.url", "https://apis.live.net/v5.0/"),
+        debug = config.get_config("storage", "skydrive.api.debug", False, boolean=True),
+        tb_interval = float(config.get_config("storage", "skydrive.api.ratelimit.interval", 0)),
+        tb_burst = int(config.get_config("storage", "skydrive.api.ratelimit.burst", 1)) )
+    if api_parameters['tb_interval'] < 0:
+        raise InvalidValueError(
+            "skydrive.api.ratelimit.interval value must be either positive or zero." )
+    if api_parameters['tb_burst'] <= 0:
+        raise InvalidValueError("skydrive.api.ratelimit.burst value must be a positive integer.")
+
     folder_id = config.get_config("storage", "skydrive.folder_id", None)
     folder_path = config.get_config("storage", "skydrive.folder_path", None)
+
     folder_buckets = int(config.get_config("storage", "skydrive.folder_buckets", 1))
+    if folder_buckets < 1:
+        raise InvalidValueError("skydrive.folder_buckets value must be a positive integer.")
 
     if not folder_id and not folder_path:
         raise InvalidValueError("Either skydrive.folder_id or skydrive.folder_path must be specified.")
@@ -71,21 +83,26 @@ def configure_skydrive_container(storedir, config):
     def folder_id_update_handler(folder_id):
         config.write_private_config("skydrive_folder_id", folder_id)
 
-    container = SkyDriveContainer( api_url,
-        folder_id, folder_path, folder_buckets,
+    container = SkyDriveContainer(
+        api_parameters, folder_id, folder_path,
         client_id, client_secret, auth_code,
+        folder_buckets=folder_buckets,
         token_update_handler=token_update_handler,
         folder_id_update_handler=folder_id_update_handler,
-        access_token=access_token, refresh_token=refresh_token,
-        api_debug=api_debug )
+        access_token=access_token, refresh_token=refresh_token, )
 
     return container
 
 
 
 class RateLimitMixin(object):
+    # TODO: generic IMixin with fixed _do_request method
 
     def __init__(self, interval, burst):
+        if interval <= 0 or burst <= 0: # no limit
+            self.bucket = None
+            return
+
         self.bucket = defer.DeferredQueue(burst, backlog=None)
         def _put_token(bucket=self.bucket):
             try: bucket.put(None)
@@ -93,6 +110,8 @@ class RateLimitMixin(object):
         task.LoopingCall(_put_token).start(interval, now=False)
 
     def _do_request(self, *args, **kwargs):
+        if not self.bucket:
+            return super(RateLimitMixin, self)._do_request(*args, **kwargs)
         return self.bucket.get().addCallback(
             lambda ignored: super(RateLimitMixin, self)._do_request(*args, **kwargs) )
 
@@ -140,20 +159,20 @@ class SkyDriveListing(object):
 class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
     implements(IContainer)
 
-    def __init__( self, api_url,
-            folder_id, folder_path, folder_buckets,
+    def __init__( self, api,
+            folder_id, folder_path,
             client_id, client_secret, auth_code,
+            folder_buckets=1,
             token_update_handler=None,
             folder_id_update_handler=None,
-            access_token=None, refresh_token=None,
-            api_debug=False ):
+            access_token=None, refresh_token=None ):
         from txskydrive.api_v5 import txSkyDrivePluggableSync, ProtocolError, DoesNotExists
 
         self.client = txSkyDrivePluggableSync(
             client_id=client_id, client_secret=client_secret, auth_code=auth_code,
             auth_access_token=access_token, auth_refresh_token=refresh_token,
             config_update_callback=token_update_handler,
-            api_url_base=api_url, debug_requests=api_debug )
+            api_url_base=api['url'], debug_requests=api['debug'] )
 
         self.folder_path = folder_path
         self.folder_id = folder_id
@@ -161,14 +180,16 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
         self.folder_name = folder_path or folder_id
 
         self.folder_buckets = folder_buckets
-        self._key_hash = sha1
-        self._key_hash_max = khm = 1 << (8 * sha1('').digest_size)
-        self._key_hash_max = khm - (khm % folder_buckets) - 1
-        self._bucket_format = '{{:0{}d}}'.format(len(str(folder_buckets)))
+        if folder_buckets != 1:
+            self._key_hash = sha1
+            self._key_hash_max = khm = 1 << (8 * sha1('').digest_size)
+            self._key_hash_max = khm - (khm % folder_buckets) - 1
+            self._bucket_format = '{{:0{}d}}'.format(len(str(folder_buckets)))
 
         self.ProtocolError, self.DoesNotExists = ProtocolError, DoesNotExists
         self.ServiceError = ProtocolError
-        super(SkyDriveContainer, self).__init__(interval=10, burst=10)
+        super(SkyDriveContainer, self).__init__(
+            interval=api['tb_interval'], burst=api['tb_burst'] )
 
     def __repr__(self):
         return '<{} {!r}>'.format(self.__class__.__name__, self.folder_name)
@@ -263,7 +284,8 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
                 key, cid = decode_key(info['name']), info['id']
                 # Hopefully that will never happen, but check just in case
                 assert key not in chunks and cid not in chunks,\
-                    'Detected two uploaded shares with same identifiers: {} / {}'.format(key, cid)
+                    'Detected two uploaded shares with same key - {}, file_ids: {} / {}'\
+                    .format(key, cid, chunks[key])
                 chunks[key] = chunks[cid] = SkyDriveItem(info, key=key)
             self._chunks = chunks
         defer.returnValue(
