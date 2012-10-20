@@ -12,6 +12,7 @@ from twisted.web import http
 from allmydata.node import InvalidValueError, MissingConfigEntry
 from allmydata.storage.backends.cloud.cloud_common import\
     IContainer, ContainerRetryMixin, CloudError
+from allmydata.util.hashutil import sha1
 from allmydata.util import log
 
 
@@ -47,6 +48,7 @@ def configure_skydrive_container(storedir, config):
     api_debug = config.get_config("storage", "skydrive.api_debug", False, boolean=True)
     folder_id = config.get_config("storage", "skydrive.folder_id", None)
     folder_path = config.get_config("storage", "skydrive.folder_path", None)
+    folder_buckets = int(config.get_config("storage", "skydrive.folder_buckets", 1))
 
     if not folder_id and not folder_path:
         raise InvalidValueError("Either skydrive.folder_id or skydrive.folder_path must be specified.")
@@ -69,7 +71,8 @@ def configure_skydrive_container(storedir, config):
     def folder_id_update_handler(folder_id):
         config.write_private_config("skydrive_folder_id", folder_id)
 
-    container = SkyDriveContainer( api_url, folder_id, folder_path,
+    container = SkyDriveContainer( api_url,
+        folder_id, folder_path, folder_buckets,
         client_id, client_secret, auth_code,
         token_update_handler=token_update_handler,
         folder_id_update_handler=folder_id_update_handler,
@@ -93,6 +96,15 @@ class RateLimitMixin(object):
         return self.bucket.get().addCallback(
             lambda ignored: super(RateLimitMixin, self)._do_request(*args, **kwargs) )
 
+
+
+def encode_key(key):
+    return key.replace('_', '__').replace('/', '_')
+
+def decode_key(key_enc):
+    if isinstance(key_enc, unicode):
+        key_enc = key_enc.encode('utf-8')
+    return '__'.join(c.replace('_', '/') for c in key_enc.split('__'))
 
 
 class SkyDriveItem(object):
@@ -125,35 +137,16 @@ class SkyDriveListing(object):
 
 
 
-def fjoin(*slugs):
-    return '/'.join(it.ifilter( None,
-        it.chain.from_iterable(slug.split('/') for slug in slugs) ))
-
-def key_split(key):
-    # shares/$PREFIX/$STORAGEINDEX/$SHNUM.$CHUNK
-    static, prefix, idx, chunk = it.ifilter(None, key.split('/'))
-    return fjoin(static, prefix), fjoin(idx, chunk)
-
-def encode_key(key):
-    return key.replace('_', '__').replace('/', '_')
-
-def decode_key(key_enc):
-    if isinstance(key_enc, unicode):
-        key_enc = key_enc.encode('utf-8')
-    return '__'.join(c.replace('_', '/') for c in key_enc.split('__'))
-
-
-
 class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
     implements(IContainer)
 
-    def __init__( self, api_url, folder_id, folder_path,
+    def __init__( self, api_url,
+            folder_id, folder_path, folder_buckets,
             client_id, client_secret, auth_code,
             token_update_handler=None,
             folder_id_update_handler=None,
             access_token=None, refresh_token=None,
             api_debug=False ):
-        # Only depend on txskydrive when this class is actually instantiated.
         from txskydrive.api_v5 import txSkyDrivePluggableSync, ProtocolError, DoesNotExists
 
         self.client = txSkyDrivePluggableSync(
@@ -167,14 +160,41 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
         self.folder_id_update_handler = folder_id_update_handler
         self.folder_name = folder_path or folder_id
 
+        self.folder_buckets = folder_buckets
+        self._key_hash = sha1
+        self._key_hash_max = khm = 1 << (8 * sha1('').digest_size)
+        self._key_hash_max = khm - (khm % folder_buckets) - 1
+        self._bucket_format = '{{:0{}d}}'.format(len(str(folder_buckets)))
+
         self.ProtocolError, self.DoesNotExists = ProtocolError, DoesNotExists
         self.ServiceError = ProtocolError
         super(SkyDriveContainer, self).__init__(interval=10, burst=10)
 
-
     def __repr__(self):
         return '<{} {!r}>'.format(self.__class__.__name__, self.folder_name)
 
+
+
+
+    def key_bucket(self, key, prefix='shares'):
+        # Can return any string, which will be used as a subdir for key.
+        # Subdir can have multiple components (subdirs) in it. Can also be empty.
+        # It doesn't matter (i.e. whole thing will work) how deeply nested
+        #  these subdirs are and whether nesting depth is consistent -
+        #  whole shares dir will be scanned recursively and all file-id's recorded.
+        # original key = shares/$PREFIX/$STORAGEINDEX/$SHNUM.$CHUNK
+        if self.folder_buckets == 1: return prefix # don't make any subfolders
+        hn, h = 0, self._key_hash(key).digest()
+        for b in h: hn = (hn << 8) + ord(b)
+        if hn > self._key_hash_max: # avoid bias by +1 hashing
+            return self.key_bucket(h)
+        return self.fjoin( prefix,
+            self._bucket_format.format(hn % self.folder_buckets) )
+
+    @staticmethod
+    def fjoin(*slugs):
+        return '/'.join(it.ifilter( None,
+            it.chain.from_iterable(slug.split('/') for slug in slugs) ))
 
     @defer.inlineCallbacks
     def _mkdir(self, path=''):
@@ -186,8 +206,14 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
         except self.DoesNotExists as err:
             parent_id, slugs = err.args
             for slug in slugs:
-                parent_id = (yield self._do_request(
-                    'mkdir', self.client.mkdir, slug, parent_id ))['id']
+                try:
+                    parent_id = (yield self._do_request(
+                        'mkdir', self.client.mkdir, slug, parent_id ))['id']
+                except CloudError as err:
+                    if err.args[1] != http.BAD_REQUEST: raise
+                    # Might be created in-parallel, try probing it
+                    parent_id = yield self._do_request(
+                        'check path', self.client.resolve_path, slug, root_id=parent_id )
             defer.returnValue(parent_id)
 
     @defer.inlineCallbacks
@@ -224,8 +250,8 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
         while lst:
             fold, info = lst.popleft()
             if info['type'] == 'folder':
-                folds[fjoin(fold, info['name'])] = info['id']
-                lst.extend( (fjoin(fold, info['name'], ci['name']), ci)
+                folds[self.fjoin(fold, info['name'])] = info['id']
+                lst.extend( (self.fjoin(fold, info['name'], ci['name']), ci)
                     for ci in (yield self._do_request('listdir', self.client.listdir, info['id'])) )
             else: chunks.append(info)
         defer.returnValue((chunks, folds))
@@ -236,8 +262,11 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
             chunk_list, self._folds = yield self._crawl()
             chunks = dict()
             for info in chunk_list:
-                key = decode_key(info['name'])
-                chunks[info['id']] = chunks[key] = SkyDriveItem(info, key=key)
+                key, cid = decode_key(info['name']), info['id']
+                # Hopefully that will never happen, but check just in case
+                assert key not in chunks and cid not in chunks,\
+                    'Detected two uploaded shares with same identifiers: {} / {}'.format(key, cid)
+                chunks[key] = chunks[cid] = SkyDriveItem(info, key=key)
             self._chunks = chunks
         defer.returnValue(
             SkyDriveListing(self.folder_name, prefix, list(
@@ -250,13 +279,14 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
         assert not content_type, content_type
         assert not metadata, metadata
 
-        fold, name = key_split(key)
+        fold = self.key_bucket(key)
         @defer.inlineCallbacks
         def _upload_chunk():
             for fail in xrange(2):
                 try:
                     defer.returnValue((yield self._do_request( 'upload',
-                        self.client.put, (encode_key(key), data), self._folds[fold] )))
+                        # Wrapper here is to omit the large chunk body from the logs
+                        lambda dst: self.client.put((encode_key(key), data), dst), self._folds[fold] )))
                 except KeyError:
                     if fail: raise
                     self._folds[fold] = yield self._mkdir(fold)
@@ -264,7 +294,7 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
 
         info['size'] = len(data)
         info['updated_time'] = datetime.utcnow().isoformat()
-        self._chunks[info['id']] = self._chunks[key] = SkyDriveItem(info, key=key)
+        self._chunks[key] = self._chunks[info['id']] = SkyDriveItem(info, key=key)
 
     @defer.inlineCallbacks
     def delete_object(self, key):
