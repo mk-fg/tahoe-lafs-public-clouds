@@ -18,13 +18,13 @@ from allmydata.util import log
 
 def configure_skydrive_container(storedir, config):
     from allmydata.storage.backends.cloud.skydrive.skydrive_container import SkyDriveContainer
+    from txskydrive.api_v5 import txSkyDrive
 
     client_id = config.get_config("storage", "skydrive.client_id")
     client_secret = config.get_private_config("skydrive_client_secret")
 
     try: auth_code = config.get_private_config("skydrive_auth_code")
     except MissingConfigEntry:
-        from txskydrive.api_v5 import txSkyDrive
         api = txSkyDrive(client_id=client_id, client_secret=client_secret)
         raise MissingConfigEntry(
             '\n\n'
@@ -44,11 +44,23 @@ def configure_skydrive_container(storedir, config):
     access_token = config.get_optional_private_config("skydrive_access_token")
     refresh_token = config.get_optional_private_config("skydrive_refresh_token")
 
+    api_timeouts = dict()
+    for k in txSkyDrive.request_io_timeouts:
+        k_conf = "skydrive.api.timeout.%s" % (k,)
+        v = config.get_config("storage", k_conf, None)
+        if v is None:
+            continue
+        v = float(v)
+        if v < 0:
+            raise InvalidValueError("%s value must be a positive integer or zero." % (k_conf,))
+        api_timeouts[k] = v
+
     api_parameters = dict(
         url = config.get_config("storage", "skydrive.api.url", "https://apis.live.net/v5.0/"),
         debug = config.get_config("storage", "skydrive.api.debug", False, boolean=True),
         tb_interval = float(config.get_config("storage", "skydrive.api.ratelimit.interval", 0)),
-        tb_burst = int(config.get_config("storage", "skydrive.api.ratelimit.burst", 1)) )
+        tb_burst = int(config.get_config("storage", "skydrive.api.ratelimit.burst", 1)),
+        timeouts=api_timeouts )
     if api_parameters['tb_interval'] < 0:
         raise InvalidValueError(
             "skydrive.api.ratelimit.interval value must be either positive or zero." )
@@ -172,7 +184,8 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
             client_id=client_id, client_secret=client_secret, auth_code=auth_code,
             auth_access_token=access_token, auth_refresh_token=refresh_token,
             config_update_callback=token_update_handler,
-            api_url_base=api['url'], debug_requests=api['debug'] )
+            api_url_base=api['url'], debug_requests=api['debug'],
+            request_io_timeouts=api['timeouts'] )
 
         self.folder_path = folder_path
         self.folder_id = folder_id
