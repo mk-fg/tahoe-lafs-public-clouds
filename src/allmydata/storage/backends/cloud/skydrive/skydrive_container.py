@@ -174,9 +174,7 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
         return '<{} {!r}>'.format(self.__class__.__name__, self.folder_name)
 
 
-
-
-    def key_bucket(self, key, prefix='shares'):
+    def key_bucket(self, key, prefix=''):
         # Can return any string, which will be used as a subdir for key.
         # Subdir can have multiple components (subdirs) in it. Can also be empty.
         # It doesn't matter (i.e. whole thing will work) how deeply nested
