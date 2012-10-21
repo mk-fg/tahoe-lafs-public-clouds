@@ -157,8 +157,7 @@ class SkyDriveItem(object):
 
 
 class SkyDriveListing(object):
-    # 'name', 'prefix', 'marker', 'max_keys',
-    #  'is_truncated', 'contents', 'common_prefixes'
+    # 'name', 'prefix', 'marker', 'max_keys', 'is_truncated', 'contents', 'common_prefixes'
 
     marker = ''
     max_keys = 2**30
@@ -225,7 +224,11 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
             self._bucket_format.format(hn % self.folder_buckets) )
 
     @staticmethod
-    def fjoin(*slugs):
+    def fjoin(*slugs, **kwz):
+        key = kwz.pop('key', None)
+        assert not kwz, kwz
+        if key is not None:
+            slugs = list(it.chain(slugs, [encode_key(key)]))
         return '/'.join(it.ifilter( None,
             it.chain.from_iterable(slug.split('/') for slug in slugs) ))
 
@@ -273,6 +276,7 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
 
 
     _chunks = None # {file_id1: info1, file_key1: info1, ...}
+    _chunks_misplaced = None # {key: file_id, ...}
     _folds = None # {fold: folder_id, ...}
 
     @defer.inlineCallbacks
@@ -284,23 +288,48 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
             fold, info = lst.popleft()
             if info['type'] == 'folder':
                 folds[self.fjoin(fold, info['name'])] = info['id']
-                lst.extend( (self.fjoin(fold, info['name'], ci['name']), ci)
+                lst.extend( (self.fjoin(fold, info['name']), ci)
                     for ci in (yield self._do_request('listdir', self.client.listdir, info['id'])) )
-            else: chunks.append(info)
+            else: chunks.append((fold, info))
         defer.returnValue((chunks, folds))
 
     @defer.inlineCallbacks
     def list_objects(self, prefix=''):
         if not self._chunks:
             chunk_list, self._folds = yield self._crawl()
-            chunks = dict()
-            for info in chunk_list:
+            self._chunks_misplaced = dict()
+            duplicate_debug, chunks = dict(), dict()
+            for fold, info in chunk_list:
                 key, cid = decode_key(info['name']), info['id']
-                # Hopefully that will never happen, but check just in case
-                assert key not in chunks and cid not in chunks,\
-                    'Detected two uploaded shares with same key - {}, file_ids: {} / {}'\
-                    .format(key, cid, chunks[key])
+
+                # Detect various duplicates
+                if key in chunks:
+                    fold_dup, info_dup = duplicate_debug[key]
+                    if info_dup['updated_time'] > info['updated_time']:
+                        (fold, info, cid), (fold_dup, info_dup) =\
+                            (fold_dup, info_dup, info_dup['id']), (fold, info)
+                    path_dup, path = self.fjoin(fold_dup, key=key), self.fjoin(fold, key=key)
+                    log.msg(( 'Detected two shares with the same key: {path_dup!r}'
+                                ' (mtime={mtime_dup}) and {path!r} (mtime={mtime}).'
+                            ' Using the latest one (by mtime): {path!r}.'
+                            ' Remove the older one ({path_dup!r}, id: {id_dup}) manually'
+                            ' to get rid of this message.' )\
+                        .format(
+                            path_dup=path_dup, mtime_dup=info_dup['updated_time'],
+                            path=path, mtime=info['updated_time'], id_dup=info_dup['id'] ), level=log.WEIRD)
+                if cid in chunks:
+                    raise AssertionError( '(API?) Bug: encountered same file_id'
+                        ' twice, should not be possible: {} (key: {})'.format(cid, key) )
+
+                fold_expected = self.key_bucket(key)
+                if fold_expected != fold:
+                    log.msg(( 'Detected share (key: {}) in an unexpected folder:'
+                        ' {} (expected: {})' ).format(key, fold, fold_expected), level=log.UNUSUAL )
+                    self._chunks_misplaced[key] = fold, cid
+
+                duplicate_debug[key] = fold, info # kept here for debug messages only
                 chunks[key] = chunks[cid] = SkyDriveItem(info, key=key)
+
             self._chunks = chunks
         defer.returnValue(
             SkyDriveListing(self.folder_name, prefix, list(
@@ -325,6 +354,12 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
                     if fail: raise
                     self._folds[fold] = yield self._mkdir(fold)
         info = yield self._mkdir_wrapper(_upload_chunk, fold)
+
+        # Make sure there won't be two same-key chunks in different folders
+        if key in self._chunks_misplaced:
+            fold_dup, cid_dup = self._chunks_misplaced[key]
+            assert fold != fold_dup, fold_dup
+            yield self._do_request('delete', self.client.delete, cid_dup)
 
         info['size'] = len(data)
         info['updated_time'] = datetime.utcnow().isoformat()
