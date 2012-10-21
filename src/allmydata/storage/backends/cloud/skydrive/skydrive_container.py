@@ -287,9 +287,15 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
         while lst:
             fold, info = lst.popleft()
             if info['type'] == 'folder':
-                folds[self.fjoin(fold, info['name'])] = info['id']
-                lst.extend( (self.fjoin(fold, info['name']), ci)
-                    for ci in (yield self._do_request('listdir', self.client.listdir, info['id'])) )
+                fold = self.fjoin(fold, info['name'])
+                folds[fold] = info['id']
+                sublst = list( (fold, ci) for ci in
+                    (yield self._do_request('listdir', self.client.listdir, info['id'])) )
+                if sublst: lst.extend(sublst)
+                else:
+                    log.msg( 'Pruning empty subdir: {} (id: {})'\
+                        .format(fold, info['id']), level=log.OPERATIONAL )
+                    yield self._do_request('delete empty subdir', self.client.delete, info['id'])
             else: chunks.append((fold, info))
         defer.returnValue((chunks, folds))
 
@@ -359,7 +365,10 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
         if key in self._chunks_misplaced:
             fold_dup, cid_dup = self._chunks_misplaced[key]
             assert fold != fold_dup, fold_dup
-            yield self._do_request('delete', self.client.delete, cid_dup)
+            yield self._do_request('delete duplicate chunk', self.client.delete, cid_dup)
+            if fold_dup not in set(it.imap( op.itemgetter(0),
+                self._chunks_misplaced.viewvalues() )): del self._folds[fold_dup]
+
 
         info['size'] = len(data)
         info['updated_time'] = datetime.utcnow().isoformat()
