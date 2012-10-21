@@ -120,6 +120,7 @@ class RateLimitMixin(object):
             try: bucket.put(None)
             except defer.QueueOverflow: pass
         task.LoopingCall(_put_token).start(interval, now=False)
+        for i in xrange(burst): _put_token()
 
     def _do_request(self, *args, **kwargs):
         if not self.bucket:
