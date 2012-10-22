@@ -2,6 +2,7 @@
 
 import itertools as it, operator as op, functools as ft
 from datetime import datetime
+from time import time
 from collections import deque
 import re
 
@@ -107,6 +108,19 @@ def configure_skydrive_container(storedir, config):
 
 
 
+def token_bucket(interval, burst=1, borrow=True):
+    tokens, rate, ts_sync = burst, interval**-1, time()
+    val = yield
+    while True:
+        if val is None: val = 1
+        ts = time()
+        ts_sync, tokens = ts, min(burst, tokens + (ts - ts_sync) * rate)
+        if tokens >= val: delay, tokens = None, tokens - val
+        else:
+            delay = (val - tokens) / rate
+            if borrow: tokens -= val
+        val = yield delay
+
 class RateLimitMixin(object):
     # TODO: generic IMixin with fixed _do_request method
 
@@ -114,19 +128,18 @@ class RateLimitMixin(object):
         if interval <= 0 or burst <= 0: # no limit
             self.bucket = None
             return
-
-        self.bucket = defer.DeferredQueue(burst, backlog=None)
-        def _put_token(bucket=self.bucket):
-            try: bucket.put(None)
-            except defer.QueueOverflow: pass
-        task.LoopingCall(_put_token).start(interval, now=False)
-        for i in xrange(burst): _put_token()
+        self.bucket = token_bucket(interval, burst)
+        next(self.bucket)
 
     def _do_request(self, *args, **kwargs):
-        if not self.bucket:
-            return super(RateLimitMixin, self)._do_request(*args, **kwargs)
-        return self.bucket.get().addCallback(
-            lambda ignored: super(RateLimitMixin, self)._do_request(*args, **kwargs) )
+        func = ft.partial(super(RateLimitMixin, self)._do_request, *args, **kwargs)
+        if not self.bucket: return func()
+        delay = next(self.bucket)
+        if delay is None: return func()
+        d = defer.Deferred()
+        d.addCallback(lambda ignored: func())
+        reactor.callLater(delay, d.callback, None)
+        return d
 
 
 
