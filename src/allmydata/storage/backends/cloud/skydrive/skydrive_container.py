@@ -124,6 +124,9 @@ def token_bucket(interval, burst=1, borrow=True):
 class RateLimitMixin(object):
     # TODO: generic IMixin with fixed _do_request method
 
+    rate_errors = 420,
+    retry_tiers = (60, 1), (120, 2), (600, 1) # [(delay, retries), ...]
+
     def __init__(self, interval, burst):
         if interval <= 0 or burst <= 0: # no limit
             self.bucket = None
@@ -131,15 +134,38 @@ class RateLimitMixin(object):
         self.bucket = token_bucket(interval, burst)
         next(self.bucket)
 
-    def _do_request(self, *args, **kwargs):
-        func = ft.partial(super(RateLimitMixin, self)._do_request, *args, **kwargs)
-        if not self.bucket: return func()
-        delay = next(self.bucket)
-        if delay is None: return func()
+    @staticmethod
+    def _delay(seconds):
         d = defer.Deferred()
-        d.addCallback(lambda ignored: func())
         reactor.callLater(delay, d.callback, None)
         return d
+
+    @defer.inlineCallbacks
+    def _do_request(self, *argz, **kwz):
+        func = ft.partial( self._rate_limit_retries,
+            super(RateLimitMixin, self)._do_request, *argz, **kwz )
+        if not self.bucket: defer.returnValue((yield func()))
+        delay = next(self.bucket)
+        if delay is None: defer.returnValue((yield func()))
+        yield self._delay(delay)
+        defer.returnValue((yield func()))
+
+    @defer.inlineCallbacks
+    def _rate_limit_retries(self, func, *argz, **kwz):
+        # These are bound to happen with free-API's, unfortunately
+        try: defer.returnValue((yield func(*argz, **kwz)))
+        except CloudError as err:
+            if err.args[1] not in self.rate_errors: raise
+            log.msg( 'Got rate-limit error from the API,'
+                ' retrying after delay.', level=log.OPERATIONAL )
+        # Do it the hard way
+        for tier, (delay, retries) in enumerate(self.retry_tiers, 1):
+            for attempt in xrange(1, retries+1):
+                yield self._delay(delay)
+                try: defer.returnValue((yield func(*argz, **kwz)))
+                except CloudError as err:
+                    if err.args[1] not in self.rate_errors\
+                        or (tier == len(self.retry_tiers) and attempt == retries): raise
 
 
 
