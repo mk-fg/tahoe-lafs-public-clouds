@@ -319,23 +319,44 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
     _folds = None # {fold: folder_id, ...}
 
     @defer.inlineCallbacks
+    def _first_result(self, *deferreds):
+        try:
+            res, idx = yield defer.DeferredList(
+                deferreds, fireOnOneCallback=True, fireOnOneErrback=True )
+        except defer.FirstError as err: err.subFailure.raiseException()
+        defer.returnValue(res)
+
+    @defer.inlineCallbacks
+    def _crawl_fold(self, fold, info):
+        sublst = list( (fold, ci) for ci in
+            (yield self._do_request('listdir', self.client.listdir, info['id'])) )
+        if not sublst:
+            log.msg( 'Pruning empty subdir: {} (id: {})'\
+                .format(fold, info['id']), level=log.OPERATIONAL )
+            yield self._do_request('delete empty subdir', self.client.delete, info['id'])
+        defer.returnValue((fold, sublst))
+
+    @defer.inlineCallbacks
     def _crawl(self):
         chunks, folds = list(), {'': self.folder_id}
         lst = deque( ('', info) for info in (yield self._mkdir_wrapper(
             lambda: self._do_request('list root', self.client.listdir, self.folder_id) )) )
-        while lst:
-            fold, info = lst.popleft()
+        lst_futures = dict()
+
+        while lst or lst_futures:
+            try: fold, info = lst.popleft()
+            except IndexError:
+                fold, sublst = yield self._first_result(*lst_futures.viewvalues())
+                lst.extend(sublst)
+                del lst_futures[fold]
+                continue
+
             if info['type'] == 'folder':
                 fold = self.fjoin(fold, info['name'])
                 folds[fold] = info['id']
-                sublst = list( (fold, ci) for ci in
-                    (yield self._do_request('listdir', self.client.listdir, info['id'])) )
-                if sublst: lst.extend(sublst)
-                else:
-                    log.msg( 'Pruning empty subdir: {} (id: {})'\
-                        .format(fold, info['id']), level=log.OPERATIONAL )
-                    yield self._do_request('delete empty subdir', self.client.delete, info['id'])
+                lst_futures[fold] = self._crawl_fold(fold, info)
             else: chunks.append((fold, info))
+
         defer.returnValue((chunks, folds))
 
     @defer.inlineCallbacks
