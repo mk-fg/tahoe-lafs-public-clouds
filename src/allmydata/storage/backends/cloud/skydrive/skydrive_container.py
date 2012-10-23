@@ -125,7 +125,7 @@ class RateLimitMixin(object):
     # TODO: generic IMixin with fixed _do_request method
 
     rate_errors = 420,
-    retry_tiers = (60, 1), (120, 2), (600, 1) # [(delay, retries), ...]
+    retry_backoff = 60, 120, 120, 600
 
     def __init__(self, interval, burst):
         if interval <= 0 or burst <= 0: # no limit
@@ -137,7 +137,7 @@ class RateLimitMixin(object):
     @staticmethod
     def _delay(seconds):
         d = defer.Deferred()
-        reactor.callLater(delay, d.callback, None)
+        reactor.callLater(seconds, d.callback, None)
         return d
 
     @defer.inlineCallbacks
@@ -156,16 +156,15 @@ class RateLimitMixin(object):
         try: defer.returnValue((yield func(*argz, **kwz)))
         except CloudError as err:
             if err.args[1] not in self.rate_errors: raise
-            log.msg( 'Got rate-limit error from the API,'
-                ' retrying after delay.', level=log.OPERATIONAL )
+            log.msg( 'Got rate-limit error from the API ({} {}), retrying after'
+                ' a delay'.format(err.args[1], err.args[2]), level=log.OPERATIONAL )
         # Do it the hard way
-        for tier, (delay, retries) in enumerate(self.retry_tiers, 1):
-            for attempt in xrange(1, retries+1):
-                yield self._delay(delay)
-                try: defer.returnValue((yield func(*argz, **kwz)))
-                except CloudError as err:
-                    if err.args[1] not in self.rate_errors\
-                        or (tier == len(self.retry_tiers) and attempt == retries): raise
+        for attempt, delay in enumerate(self.retry_backoff, 1):
+            yield self._delay(delay)
+            try: defer.returnValue((yield func(*argz, **kwz)))
+            except CloudError as err:
+                if err.args[1] not in self.rate_errors\
+                    or attempt == len(self.retry_backoff): raise
 
 
 
