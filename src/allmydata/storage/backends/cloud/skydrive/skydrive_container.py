@@ -388,8 +388,9 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
 
                 fold_expected = self.key_bucket(key)
                 if fold_expected != fold:
-                    log.msg(( 'Detected share (key: {}) in an unexpected folder:'
-                        ' {} (expected: {})' ).format(key, fold, fold_expected), level=log.UNUSUAL )
+                    ## These are somewhat important, but way too noisy on skydrive.folder_buckets update
+                    # log.msg(( 'Detected share (key: {}) in an unexpected folder:'
+                    # 	' {} (expected: {})' ).format(key, fold, fold_expected), level=log.UNUSUAL )
                     self._chunks_misplaced[key] = fold, cid
 
                 duplicate_debug[key] = fold, info # kept here for debug messages only
