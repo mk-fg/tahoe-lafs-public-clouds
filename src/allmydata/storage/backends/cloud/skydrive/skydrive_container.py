@@ -123,7 +123,8 @@ def token_bucket(interval, burst=1, borrow=True):
             if borrow: tokens -= val
         val = yield delay
 
-class RateLimitMixin(object):
+class ContainerRateLimitMixin(object):
+    # Uses/expects container._reactor attribute set for the object
     # TODO: generic IMixin with fixed _do_request method
 
     rate_errors = 420,
@@ -136,16 +137,15 @@ class RateLimitMixin(object):
         self.bucket = token_bucket(interval, burst)
         next(self.bucket)
 
-    @staticmethod
-    def _delay(seconds):
+    def _delay(self, seconds):
         d = defer.Deferred()
-        reactor.callLater(seconds, d.callback, None)
+        self._reactor.callLater(seconds, d.callback, None)
         return d
 
     @defer.inlineCallbacks
     def _do_request(self, *argz, **kwz):
         func = ft.partial( self._rate_limit_retries,
-            super(RateLimitMixin, self)._do_request, *argz, **kwz )
+            super(ContainerRateLimitMixin, self)._do_request, *argz, **kwz )
         if not self.bucket: defer.returnValue((yield func()))
         delay = next(self.bucket)
         if delay is None: defer.returnValue((yield func()))
@@ -208,7 +208,7 @@ class SkyDriveListing(ContainerListing):
 
 
 
-class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
+class SkyDriveContainer(ContainerRateLimitMixin, ContainerRetryMixin):
     implements(IContainer)
 
     def __init__( self, api,
@@ -217,7 +217,8 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
             folder_buckets=1,
             token_update_handler=None,
             folder_id_update_handler=None,
-            access_token=None, refresh_token=None ):
+            access_token=None, refresh_token=None,
+            override_reactor=None ):
         from txskydrive.api_v5 import txSkyDrivePluggableSync, ProtocolError, DoesNotExists
 
         self.client = txSkyDrivePluggableSync(
@@ -238,6 +239,8 @@ class SkyDriveContainer(RateLimitMixin, ContainerRetryMixin):
             self._key_hash_max = khm = 1 << (8 * sha1('').digest_size)
             self._key_hash_max = khm - (khm % folder_buckets) - 1
             self._bucket_format = '{{:0{}d}}'.format(len(str(folder_buckets)))
+
+        self._reactor = override_reactor or reactor
 
         self.ProtocolError, self.DoesNotExists = ProtocolError, DoesNotExists
         self.ServiceError = ProtocolError
