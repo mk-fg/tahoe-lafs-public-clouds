@@ -1,0 +1,4 @@
+
+from allmydata.storage.backends.cloud.skydrive.skydrive_container import configure_skydrive_container
+
+configure_container = configure_skydrive_container

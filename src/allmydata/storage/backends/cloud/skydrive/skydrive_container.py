@@ -11,8 +11,10 @@ from twisted.internet import reactor, defer, task
 from twisted.web import http
 
 from allmydata.node import InvalidValueError, MissingConfigEntry
-from allmydata.storage.backends.cloud.cloud_common import\
-    IContainer, ContainerRetryMixin, CloudError
+from allmydata.storage.backends.cloud.cloud_common import (
+    IContainer, ContainerRetryMixin, CloudError,
+    CloudServiceError, ContainerItem, ContainerListing,
+    CommonContainerMixin, HTTPClientMixin )
 from allmydata.util.hashutil import sha1
 from allmydata.util import log
 
@@ -177,32 +179,32 @@ def decode_key(key_enc):
     return '__'.join(c.replace('_', '/') for c in key_enc.split('__'))
 
 
-class SkyDriveItem(object):
+class SkyDriveItem(ContainerItem):
     # 'key', 'modification_date', 'etag', 'size', 'storage_class', 'owner'
 
-    storage_class = 'STANDARD'
-    etag = None
-    owner = None
-
     backend_id = None
+    storage_class = 'STANDARD'
 
     def __init__(self, info, **kwz):
-        self.key = kwz.pop('key', None) or decode_key(info['name'])
         self.backend_id = kwz.pop('backend_id', None) or info['id']
-        self.modification_date = kwz.pop('modification_date', None) or info['updated_time']
-        self.size = kwz.pop('size', None) or info['size']
-        for k, v in kwz.viewitems(): setattr(self, k, v)
+        super(SkyDriveItem, self).__init__(
+            kwz.pop('key', None) or decode_key(info['name']), # key
+            kwz.pop('modification_date', None) or info['updated_time'], # modification_date
+            self.backend_id, # etag
+            kwz.pop('size', None) or info['size'], # size
+            self.storage_class ) # storage_class
+        for k, v in kwz.viewitems(): setattr(self, k, v) # extras
 
 
-class SkyDriveListing(object):
+class SkyDriveListing(ContainerListing):
     # 'name', 'prefix', 'marker', 'max_keys', 'is_truncated', 'contents', 'common_prefixes'
 
-    marker = ''
     max_keys = 2**30
     is_truncated = 'false'
 
     def __init__(self, name, prefix, contents):
-        self.name, self.prefix, self.contents = name, prefix, contents
+        super(SkyDriveListing, self).__init__(
+            name, prefix, None, self.max_keys, self.is_truncated, contents=contents )
 
 
 
