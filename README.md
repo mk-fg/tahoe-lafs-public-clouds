@@ -22,3 +22,33 @@ repository (or a local fork at
 I intentionally avoid calling providers mentioned above "free" as their policies
 are usually openly hostile to users, developers or both, hence that word might
 be confusing and innacurate in such context.
+
+
+Installation
+--------------------
+
+Modules in these repo
+(e.g. [skydrive](https://github.com/mk-fg/tahoe-lafs-public-clouds/tree/master/skydrive))
+correspond to backend drivers, which currently should be placed into
+"src/allmydata/storage/backends/cloud" directory inside tahoe-lafs source tree.
+
+Dependency modules for these drivers are listed in the
+[requirements.txt](https://github.com/mk-fg/tahoe-lafs-public-clouds/blob/master/requirements.txt)
+file and can be either installed by hand or added to
+"src/allmydata/_auto_deps.py" in tahoe-lafs, so that they'd be installed and
+updated alongside other tahoe-lafs deps.
+
+Finally, CLOUD_INTERFACES variable in
+"src/allmydata/storage/backends/cloud/cloud_backend.py" should contain the new
+backends, for example:
+
+	CLOUD_INTERFACES = ("cloud.s3", "cloud.openstack", "cloud.googlestorage", "cloud.msazure", "cloud.skydrive")
+
+As for the configuration - check out the
+[doc/cloud.rst](https://github.com/mk-fg/tahoe-lafs-public-clouds/blob/master/doc/cloud.rst).
+
+Alternatively, [cloud-backend-drivers
+branch](https://github.com/mk-fg/tahoe-lafs/tree/cloud-backend-drivers) in a
+local fork has all the changes above merged, along with this project linked as a
+[git submodule](https://git.wiki.kernel.org/index.php/GitSubmoduleTutorial).
+Just clone that one and you're all set.
