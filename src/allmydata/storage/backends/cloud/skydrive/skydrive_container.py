@@ -23,10 +23,10 @@ def configure_skydrive_container(storedir, config):
     from allmydata.storage.backends.cloud.skydrive.skydrive_container import SkyDriveContainer
     from txskydrive.api_v5 import txSkyDrive
 
-    client_id = config.get_config("storage", "skydrive.client_id")
-    client_secret = config.get_private_config("skydrive_client_secret")
+    client_id = config.get_config('storage', 'skydrive.client_id')
+    client_secret = config.get_private_config('skydrive_client_secret')
 
-    try: auth_code = config.get_private_config("skydrive_auth_code")
+    try: auth_code = config.get_private_config('skydrive_auth_code')
     except MissingConfigEntry:
         api = txSkyDrive(client_id=client_id, client_secret=client_secret)
         raise MissingConfigEntry(
@@ -36,64 +36,64 @@ def configure_skydrive_container(storedir, config):
                 '  (starting with "https://login.live.com/oauth20_desktop.srf") you will get\n'
                 '  redirected to in the end into "private/skydrive_auth_code" file.\n\n'
             ' See "Authorization" section in "doc/cloud.rst" for details.\n\n'
-            ' URL to visit: %s\n'%(api.auth_user_get_url()) )
+            ' URL to visit: {}\n'.format(api.auth_user_get_url()) )
 
     if re.search(r'^https?://', auth_code):
         from txskydrive.api_v5 import txSkyDrive
         api = txSkyDrive(client_id=client_id, client_secret=client_secret)
         api.auth_user_process_url(auth_code)
-        config.write_private_config("skydrive_auth_code", api.auth_code)
+        config.write_private_config('skydrive_auth_code', api.auth_code)
 
-    access_token = config.get_optional_private_config("skydrive_access_token")
-    refresh_token = config.get_optional_private_config("skydrive_refresh_token")
+    access_token = config.get_optional_private_config('skydrive_access_token')
+    refresh_token = config.get_optional_private_config('skydrive_refresh_token')
 
     api_timeouts = dict()
     for k in txSkyDrive.request_io_timeouts:
-        k_conf = "skydrive.api.timeout.%s" % (k,)
-        v = config.get_config("storage", k_conf, None)
+        k_conf = 'skydrive.api.timeout.{}'.format(k)
+        v = config.get_config('storage', k_conf, None)
         if v is None:
             continue
         v = float(v)
         if v < 0:
-            raise InvalidValueError("%s value must be a positive integer or zero." % (k_conf,))
+            raise InvalidValueError('{} value must be a positive integer or zero.'.format(k_conf))
         api_timeouts[k] = v
 
     api_parameters = dict(
-        url = config.get_config("storage", "skydrive.api.url", "https://apis.live.net/v5.0/"),
-        debug = config.get_config("storage", "skydrive.api.debug", False, boolean=True),
-        tb_interval = float(config.get_config("storage", "skydrive.api.ratelimit.interval", 0)),
-        tb_burst = int(config.get_config("storage", "skydrive.api.ratelimit.burst", 1)),
+        url = config.get_config('storage', 'skydrive.api.url', 'https://apis.live.net/v5.0/'),
+        debug = config.get_config('storage', 'skydrive.api.debug', False, boolean=True),
+        tb_interval = float(config.get_config('storage', 'skydrive.api.ratelimit.interval', 0)),
+        tb_burst = int(config.get_config('storage', 'skydrive.api.ratelimit.burst', 1)),
         timeouts=api_timeouts )
     if api_parameters['tb_interval'] < 0:
         raise InvalidValueError(
-            "skydrive.api.ratelimit.interval value must be either positive or zero." )
+            'skydrive.api.ratelimit.interval value must be either positive or zero.' )
     if api_parameters['tb_burst'] <= 0:
-        raise InvalidValueError("skydrive.api.ratelimit.burst value must be a positive integer.")
+        raise InvalidValueError('skydrive.api.ratelimit.burst value must be a positive integer.')
 
-    folder_id = config.get_config("storage", "skydrive.folder_id", None)
-    folder_path = config.get_config("storage", "skydrive.folder_path", None)
+    folder_id = config.get_config('storage', 'skydrive.folder_id', None)
+    folder_path = config.get_config('storage', 'skydrive.folder_path', None)
 
-    folder_buckets = int(config.get_config("storage", "skydrive.folder_buckets", 1))
+    folder_buckets = int(config.get_config('storage', 'skydrive.folder_buckets', 1))
     if folder_buckets < 1:
-        raise InvalidValueError("skydrive.folder_buckets value must be a positive integer.")
+        raise InvalidValueError('skydrive.folder_buckets value must be a positive integer.')
 
     if not folder_id and not folder_path:
-        raise InvalidValueError("Either skydrive.folder_id or skydrive.folder_path must be specified.")
+        raise InvalidValueError('Either skydrive.folder_id or skydrive.folder_path must be specified.')
     elif folder_id and folder_path:
-        raise InvalidValueError( "Only one of skydrive.folder_id"
-            " or skydrive.folder_path must be specified, not both." )
+        raise InvalidValueError( 'Only one of skydrive.folder_id'
+            ' or skydrive.folder_path must be specified, not both.' )
     elif not folder_id:
-        folder_id = config.get_optional_private_config("skydrive_folder_id")
+        folder_id = config.get_optional_private_config('skydrive_folder_id')
         folder_id_created = True
     else:
         folder_id_created = False
 
     def token_update_handler(auth_access_token, auth_refresh_token, **kwargs):
-        config.write_private_config("skydrive_access_token", auth_access_token)
-        config.write_private_config("skydrive_refresh_token", auth_refresh_token)
+        config.write_private_config('skydrive_access_token', auth_access_token)
+        config.write_private_config('skydrive_refresh_token', auth_refresh_token)
         if kwargs:
             log.msg( 'Received unhandled SkyDrive access'
-                ' data, discarded: %s'%(', '.join(kwargs.keys())), level=log.WEIRD )
+                ' data, discarded: {}'.format(', '.join(kwargs.keys())), level=log.WEIRD )
 
     def folder_id_update_handler(folder_id):
         config.write_private_config("skydrive_folder_id", folder_id)
