@@ -20,7 +20,6 @@ from allmydata.util import log
 
 
 def configure_skydrive_container(storedir, config):
-	from allmydata.storage.backends.cloud.skydrive.skydrive_container import SkyDriveContainer
 	from txskydrive.api_v5 import txSkyDrive
 
 	client_id = config.get_config('storage', 'skydrive.client_id')
@@ -39,7 +38,6 @@ def configure_skydrive_container(storedir, config):
 			' URL to visit: {}\n'.format(api.auth_user_get_url()) )
 
 	if re.search(r'^https?://', auth_code):
-		from txskydrive.api_v5 import txSkyDrive
 		api = txSkyDrive(client_id=client_id, client_secret=client_secret)
 		api.auth_user_process_url(auth_code)
 		auth_code = api.auth_code
@@ -97,7 +95,7 @@ def configure_skydrive_container(storedir, config):
 				' data, discarded: {}'.format(', '.join(kwargs.keys())), level=log.WEIRD )
 
 	def folder_id_update_handler(folder_id):
-		config.write_private_config("skydrive_folder_id", folder_id)
+		config.write_private_config('skydrive_folder_id', folder_id)
 
 	container = SkyDriveContainer(
 		api_parameters, folder_id, folder_path,
