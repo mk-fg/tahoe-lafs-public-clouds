@@ -42,7 +42,8 @@ def configure_skydrive_container(storedir, config):
 		from txskydrive.api_v5 import txSkyDrive
 		api = txSkyDrive(client_id=client_id, client_secret=client_secret)
 		api.auth_user_process_url(auth_code)
-		config.write_private_config('skydrive_auth_code', api.auth_code)
+		auth_code = api.auth_code
+		config.write_private_config('skydrive_auth_code', auth_code)
 
 	access_token = config.get_optional_private_config('skydrive_access_token')
 	refresh_token = config.get_optional_private_config('skydrive_refresh_token')
