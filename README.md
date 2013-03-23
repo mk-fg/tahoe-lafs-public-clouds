@@ -52,3 +52,32 @@ branch](https://github.com/mk-fg/tahoe-lafs/tree/cloud-backend-drivers) in a
 local fork has all the changes above merged, along with this project linked as a
 [git submodule](https://git.wiki.kernel.org/index.php/GitSubmoduleTutorial).
 Just clone that one and you're all set.
+
+
+Useable public-cloud backends
+--------------------
+
+This list doesn't include enterprise cloud drivers (such as s3, openstack,
+googlestorage, msazure), which are implemented
+[upstream](https://github.com/LeastAuthority/tahoe-lafs).
+
+- [x] MS SkyDrive (7-25 GiB)
+
+- [x] Yandex Disk (10 GiB, doesn't need special driver - works great with
+  [davfs2](https://savannah.nongnu.org/projects/davfs2))
+
+- [x] box.net (5 GiB, experimental)
+
+- [ ] Ubuntu One (5 GiB)
+
+- [ ] Google Drive (5 GiB)
+
+- [ ] SugarSync (5 GiB)
+
+- [ ] Wuala (5 GiB)
+
+- [ ] Dropbox (2 GiB)
+
+Fairly long (but still far from complete) list/matrix of such services can be
+found [on
+wikipedia](https://en.wikipedia.org/wiki/Comparison_of_file_hosting_services).
