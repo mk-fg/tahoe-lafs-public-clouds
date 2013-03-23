@@ -1,0 +1,4 @@
+
+from allmydata.storage.backends.cloud.boxdotnet.boxdotnet_container import configure_boxdotnet_container
+
+configure_container = configure_boxdotnet_container
