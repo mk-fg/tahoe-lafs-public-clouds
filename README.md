@@ -61,6 +61,9 @@ This list doesn't include enterprise cloud drivers (such as s3, openstack,
 googlestorage, msazure), which are implemented
 [upstream](https://github.com/LeastAuthority/tahoe-lafs).
 
+Space amounts in braces are for non-paid accounts, paid ones usually start from
+5x+ of that number.
+
 - [x] MS SkyDrive (7-25 GiB)
 
 - [x] Yandex Disk (10 GiB, doesn't need special driver - works great with
@@ -81,3 +84,6 @@ googlestorage, msazure), which are implemented
 Fairly long (but still far from complete) list/matrix of such services can be
 found [on
 wikipedia](https://en.wikipedia.org/wiki/Comparison_of_file_hosting_services).
+
+Note that a lot of backends can be used with local file cache and proprietary
+(backend-specific) synchronization tools.
