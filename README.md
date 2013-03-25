@@ -9,7 +9,7 @@ client-side security mechanisms and interfaces with no-cost public cloud storage
 like skydrive, google drive and dropbox.
 
 Previously, contents of this project were in my fork of tahoe-lafs
-(cloud-backend* brnahces), but as code style and some pactices used here look
+(cloud-backend* branches), but as code style and some pactices used here look
 way different from upstream, decided that it'd be better to have a separate
 project, to have clear boundary and avoid any confusion.
 
@@ -27,10 +27,11 @@ be confusing and innacurate in such context.
 Installation
 --------------------
 
-Modules in these repo
-(e.g. [skydrive](https://github.com/mk-fg/tahoe-lafs-public-clouds/tree/master/skydrive))
-correspond to backend drivers, which currently should be placed into
-"src/allmydata/storage/backends/cloud" directory inside tahoe-lafs source tree.
+Modules in
+[pubclouds](https://github.com/mk-fg/tahoe-lafs-public-clouds/tree/master/pubclouds)
+path of this repo correspond to backend drivers, which currently should be
+placed into "src/allmydata/storage/backends/cloud" directory inside tahoe-lafs
+source tree.
 
 Dependency modules for these drivers are listed in the
 [requirements.txt](https://github.com/mk-fg/tahoe-lafs-public-clouds/blob/master/requirements.txt)
