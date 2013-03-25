@@ -7,7 +7,7 @@
 from __future__ import print_function
 
 import itertools as it, operator as op, functools as ft
-from os.path import dirname, basename, join, splitext, realpath, expanduser
+from os.path import dirname, basename, join, splitext, expanduser
 import os, sys, types, yaml
 
 from twisted.internet import defer, reactor
@@ -39,7 +39,7 @@ def main(argv=None):
 	log = logging.getLogger()
 	logging.basicConfig(level=logging.WARNING if not optz.debug else logging.DEBUG)
 
-	with open('{}.yaml'.format(splitext(realpath(__file__))[0])) as conf:
+	with open('{}.yaml'.format(splitext(__file__)[0])) as conf:
 		conf = yaml.load(conf)
 
 	@defer.inlineCallbacks
