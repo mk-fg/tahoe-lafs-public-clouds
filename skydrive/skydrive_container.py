@@ -231,6 +231,7 @@ class SkyDriveContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 		self.folder_id = folder_id
 		self.folder_id_update_handler = folder_id_update_handler
 		self.folder_name = folder_path or folder_id
+		if self.folder_id is None: reactor.callLater(1, self._mkdir_root)
 
 		self.folder_buckets = folder_buckets
 		if folder_buckets != 1:
@@ -295,13 +296,17 @@ class SkyDriveContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 			defer.returnValue(parent_id)
 
 	@defer.inlineCallbacks
+	def _mkdir_root(self):
+		self.folder_id = yield self._mkdir()
+		self.folder_id_update_handler(self.folder_id)
+
+	@defer.inlineCallbacks
 	def _mkdir_wrapper(self, func, path=''):
 		try: defer.returnValue((yield defer.maybeDeferred(func)))
 		except self.ProtocolError as err: http_code = err.code
 		except CloudError as err: http_code = err.args[1]
 		if http_code not in [http.NOT_FOUND, http.GONE]: raise
-		self.folder_id = yield self._mkdir()
-		self.folder_id_update_handler(self.folder_id)
+		yield self._mkdir_root()
 		yield self._mkdir(path)
 		defer.returnValue((yield defer.maybeDeferred(func)))
 
