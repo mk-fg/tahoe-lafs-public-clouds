@@ -40,6 +40,7 @@ def configure_boxdotnet_container(storedir, config):
 	if re.search(r'^https?://', auth_code):
 		api = txBox(client_id=client_id, client_secret=client_secret)
 		api.auth_user_process_url(auth_code)
+		auth_code = api.auth_code
 		config.write_private_config('box_auth_code', api.auth_code)
 
 	access_token = config.get_optional_private_config('box_access_token')
@@ -57,7 +58,6 @@ def configure_boxdotnet_container(storedir, config):
 		api_timeouts[k] = v
 
 	api_parameters = dict(
-		url = config.get_config('storage', 'box.api.url', 'https://apis.live.net/v5.0/'),
 		debug = config.get_config('storage', 'box.api.debug', False, boolean=True),
 		tb_interval = float(config.get_config('storage', 'box.api.ratelimit.interval', 0)),
 		tb_burst = int(config.get_config('storage', 'box.api.ratelimit.burst', 1)),
@@ -187,7 +187,7 @@ class BoxItem(ContainerItem):
 		self.backend_id = kwz.pop('backend_id', None) or info['id']
 		super(BoxItem, self).__init__(
 			kwz.pop('key', None) or decode_key(info['name']), # key
-			kwz.pop('modification_date', None) or info['updated_time'], # modification_date
+			kwz.pop('modification_date', None) or info['content_modified_at'], # modification_date
 			self.backend_id, # etag
 			kwz.pop('size', None) or info['size'], # size
 			self.storage_class ) # storage_class
@@ -217,19 +217,19 @@ class BoxContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 			folder_id_update_handler=None,
 			access_token=None, refresh_token=None,
 			override_reactor=None ):
-		from txboxdotnet.api_v5 import txBoxPluggableSync, ProtocolError, DoesNotExists
+		from txboxdotnet.api_v2 import txBoxPluggableSync, ProtocolError, DoesNotExists
 
 		self.client = txBoxPluggableSync(
 			client_id=client_id, client_secret=client_secret, auth_code=auth_code,
 			auth_access_token=access_token, auth_refresh_token=refresh_token,
 			config_update_callback=token_update_handler,
-			api_url_base=api['url'], debug_requests=api['debug'],
-			request_io_timeouts=api['timeouts'] )
+			debug_requests=api['debug'], request_io_timeouts=api['timeouts'] )
 
 		self.folder_path = folder_path
 		self.folder_id = folder_id
 		self.folder_id_update_handler = folder_id_update_handler
 		self.folder_name = folder_path or folder_id
+		if self.folder_id is None: reactor.callLater(1, self._mkdir_root)
 
 		self.folder_buckets = folder_buckets
 		if folder_buckets != 1:
@@ -294,13 +294,17 @@ class BoxContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 			defer.returnValue(parent_id)
 
 	@defer.inlineCallbacks
+	def _mkdir_root(self):
+		self.folder_id = yield self._mkdir()
+		self.folder_id_update_handler(self.folder_id)
+
+	@defer.inlineCallbacks
 	def _mkdir_wrapper(self, func, path=''):
 		try: defer.returnValue((yield defer.maybeDeferred(func)))
 		except self.ProtocolError as err: http_code = err.code
 		except CloudError as err: http_code = err.args[1]
 		if http_code not in [http.NOT_FOUND, http.GONE]: raise
-		self.folder_id = yield self._mkdir()
-		self.folder_id_update_handler(self.folder_id)
+		yield self._mkdir_root()
 		yield self._mkdir(path)
 		defer.returnValue((yield defer.maybeDeferred(func)))
 
@@ -310,8 +314,8 @@ class BoxContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 
 	@defer.inlineCallbacks
 	def delete(self):
-		yield self._do_request(
-			'delete root', self.client.delete, self.folder_id )
+		yield self._do_request( 'delete root',
+			self.client.delete_folder, self.folder_id, recursive=True )
 		self._chunks.clear()
 		self._folds.clear()
 
@@ -328,21 +332,24 @@ class BoxContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 		except defer.FirstError as err: err.subFailure.raiseException()
 		defer.returnValue(res)
 
+	def _listdir(self, folder_id):
+		return self.client.listdir(folder_id, fields=['name', 'size', 'content_modified_at'])
+
 	@defer.inlineCallbacks
 	def _crawl_fold(self, fold, info):
 		sublst = list( (fold, ci) for ci in
-			(yield self._do_request('listdir', self.client.listdir, info['id'])) )
+			(yield self._do_request('listdir', self._listdir, info['id'])) )
 		if not sublst:
 			log.msg( 'Pruning empty subdir: {} (id: {})'\
 				.format(fold, info['id']), level=log.OPERATIONAL )
-			yield self._do_request('delete empty subdir', self.client.delete, info['id'])
+			yield self._do_request('delete empty subdir', self.client.delete_folder, info['id'])
 		defer.returnValue((fold, sublst))
 
 	@defer.inlineCallbacks
 	def _crawl(self):
 		chunks, folds = list(), {'': self.folder_id}
 		lst = deque( ('', info) for info in (yield self._mkdir_wrapper(
-			lambda: self._do_request('list root', self.client.listdir, self.folder_id) )) )
+			lambda: self._do_request('list root', self._listdir, self.folder_id) )) )
 		lst_futures = dict()
 
 		while lst or lst_futures:
@@ -373,7 +380,7 @@ class BoxContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 				# Detect various duplicates
 				if key in chunks:
 					fold_dup, info_dup = duplicate_debug[key]
-					if info_dup['updated_time'] > info['updated_time']:
+					if info_dup['content_modified_at'] > info['content_modified_at']:
 						(fold, info, cid), (fold_dup, info_dup) =\
 							(fold_dup, info_dup, info_dup['id']), (fold, info)
 					path_dup, path = self.fjoin(fold_dup, key=key), self.fjoin(fold, key=key)
@@ -383,8 +390,8 @@ class BoxContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 							' Remove the older one ({path_dup!r}, id: {id_dup}) manually'
 							' to get rid of this message.' )\
 						.format(
-							path_dup=path_dup, mtime_dup=info_dup['updated_time'],
-							path=path, mtime=info['updated_time'], id_dup=info_dup['id'] ), level=log.WEIRD)
+							path_dup=path_dup, mtime_dup=info_dup['content_modified_at'],
+							path=path, mtime=info['content_modified_at'], id_dup=info_dup['id'] ), level=log.WEIRD)
 				if cid in chunks:
 					raise AssertionError( '(API?) Bug: encountered same file_id'
 						' twice, should not be possible: {} (key: {})'.format(cid, key) )
@@ -414,33 +421,40 @@ class BoxContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 		fold = self.key_bucket(key)
 		@defer.inlineCallbacks
 		def _upload_chunk():
-			for fail in xrange(2):
-				try:
-					defer.returnValue((yield self._do_request( 'upload',
-						# Wrapper here is to omit the large chunk body from the logs
-						lambda dst: self.client.put((encode_key(key), data), dst), self._folds[fold] )))
+			name, tried_cleanup = encode_key(key), False
+			for fail in xrange(5): # arbitrary 3+ number, to avoid infinite loops
+				try: defer.returnValue((yield self.client.put((name, data), self._folds[fold])))
+				except self.ProtocolError as err: # handle conflicts by removing old file
+					if err.code != 409: raise
+					try: chunk_id = self._chunks[key].backend_id
+					except KeyError:
+						chunk_id = yield self.client.resolve_path(name, root_id=self._folds[fold])
+					defer.returnValue((yield self.client.put((name, data), file_id=chunk_id)))
 				except KeyError:
 					if fail: raise
 					self._folds[fold] = yield self._mkdir(fold)
-		info = yield self._mkdir_wrapper(_upload_chunk, fold)
+				else: break
+			else: raise RuntimeError('Expected loop break missing')
+		info = (yield self._mkdir_wrapper(
+			ft.partial(self._do_request, 'upload', _upload_chunk), fold ))['entries'][0]
 
 		# Make sure there won't be two same-key chunks in different folders
 		if key in self._chunks_misplaced:
 			fold_dup, cid_dup = self._chunks_misplaced[key]
 			assert fold != fold_dup, fold_dup
-			yield self._do_request('delete duplicate chunk', self.client.delete, cid_dup)
+			yield self._do_request('delete duplicate chunk', self.client.delete_file, cid_dup)
 			if fold_dup not in set(it.imap( op.itemgetter(0),
 				self._chunks_misplaced.viewvalues() )): del self._folds[fold_dup]
 
 
 		info['size'] = len(data)
-		info['updated_time'] = datetime.utcnow().isoformat()
+		info['content_modified_at'] = datetime.utcnow().isoformat()
 		self._chunks[key] = self._chunks[info['id']] = BoxItem(info, key=key)
 
 	@defer.inlineCallbacks
 	def delete_object(self, key):
 		chunk_id = self._chunks[key].backend_id
-		yield self._do_request('delete', self.client.delete, chunk_id)
+		yield self._do_request('delete', self.client.delete_file, chunk_id)
 		del self._chunks[key], self._chunks[chunk_id]
 
 

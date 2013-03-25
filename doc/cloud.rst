@@ -161,3 +161,16 @@ To enable storing shares on SkyDrive, add the following keys to the server's
     any size (there can be any number of data-receiving operations), but will
     only be triggered if not a single byte of data will be sent/received to/from
     a remote server for a specified time interval.
+
+
+
+box.net
+=======
+
+Free and commercial file hosting and collaboration service `<http://box.net>`_.
+
+Driver is virtually identical to the one for SkyDrive, including authorization
+step (at `<http://www.box.net/developers/services>`_) and all the options (only
+they use "box." namespace).
+
+To enable it, use: ``backend = cloud.boxdotnet``
