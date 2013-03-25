@@ -66,7 +66,7 @@ Space amounts in braces are for non-paid accounts, paid ones usually start from
 
 - [x] MS SkyDrive (7-25 GiB)
 
-- [x] Yandex Disk (10 GiB, doesn't need special driver - works great with
+- [x] Yandex Disk (8-10 GiB, doesn't need special driver - works great with
   [davfs2](https://savannah.nongnu.org/projects/davfs2))
 
 - [x] box.net (5 GiB, experimental)
