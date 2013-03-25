@@ -1,0 +1,19 @@
+# Loaded from <script_name>.yaml
+
+# Issue notifications if free space drops lower than the
+#  specified fraction of service space quota (0 < x < 1).
+threshold: 0.7
+
+backends:
+  # {driver_name: {service_tag: parameters...}, ...}
+  # Optional "threshold" parameter can be used to override it per-tag
+
+  vfs: # parameters - path string or {path: ..., ...}
+    Yandex: ~tahoe/yandex/storage/shares
+
+  txskydrive: # uses default ~/.lcrc
+    SkyDrive:
+      threshold: 0.8
+
+  txboxdotnet: # uses default ~/.boxrc
+    box.net:
