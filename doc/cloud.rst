@@ -196,10 +196,10 @@ secret) to work.
 These have to be stored in corresponding files within a "private" subdir of a
 node directory:
 
-    private/u1_consumer_key
-    private/u1_consumer_secret
-    private/u1_token
-    private/u1_token_secret
+ - private/u1_consumer_key
+ - private/u1_consumer_secret
+ - private/u1_token
+ - private/u1_token_secret
 
 All of them are alphanumeric strings of 5-50 characters and must be acquired
 from Ubuntu Single Sign On (Ubuntu SSO) service.
@@ -228,6 +228,18 @@ To enable storing shares on SkyDrive, add the following keys to the server's
     A path to use to store LAFS shares in. Must include volume.
 
     Example: /~/myvolume/tahoe/storage
+
+``private/u1_consumer_key (required)``
+
+``private/u1_consumer_secret (required)``
+
+``private/u1_token (required)``
+
+``private/u1_token_secret (required)``
+
+    U1 OAuth 1.0 credentials should be written (by hand) to these files.
+
+    See "Authorization" section above for more information.
 
 ``u1.api.debug = (boolean, optional)``
 
