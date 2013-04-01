@@ -174,3 +174,67 @@ step (at `<http://www.box.net/developers/services>`_) and all the options (only
 they use "box." namespace).
 
 To enable it, use: ``backend = cloud.boxdotnet``
+
+
+
+Ubuntu One
+==========
+
+Ubuntu One is a free / commercial file hosting service
+`<https://one.ubuntu.com/>`_.
+
+It's "Files Cloud" HTTP API seem to be among the simpliest the similar REST APIs
+I've seen, second only to totally standard WebDAV of Yandex Disk service.
+
+
+Authorization
+-------------
+
+Driver needs OAuth 1.0 credentials (consumer key/secret, token and token
+secret) to work.
+
+These have to be stored in corresponding files within a "private" subdir of a
+node directory:
+
+    private/u1_consumer_key
+    private/u1_consumer_secret
+    private/u1_token
+    private/u1_token_secret
+
+All of them are alphanumeric strings of 5-50 characters and must be acquired
+from Ubuntu Single Sign On (Ubuntu SSO) service.
+
+It's a bit of a TODO, but currently it's possible to do that by running example
+code that comes with `txu1 <https://github.com/mk-fg/txu1>` python module.
+
+Basically just run ``python txu1/api_v1.py`` and it'll query email/password,
+creating u1_* files with these credentials in the current dir.
+
+
+Configuration parameters
+------------------------
+
+To enable storing shares on SkyDrive, add the following keys to the server's
+``tahoe.cfg`` file:
+
+``[storage]``
+
+``backend = cloud.u1``
+
+    This turns off the local filesystem backend and enables Ubuntu One backend.
+
+``u1.path = (string, required)``
+
+    A path to use to store LAFS shares in. Must include volume.
+
+    Example: /~/myvolume/tahoe/storage
+
+``u1.api.debug = (boolean, optional)``
+
+``u1.api.ratelimit.interval = (positive float, 0 - no limit, optional), default 0``
+
+``u1.api.ratelimit.burst = (positive integer, optional), default 1``
+
+``u1.api.timeout.* = (positive float, 0 - no limit, optional)``
+
+    Same as for SkyDrive and box.net, see more detailed description above.
