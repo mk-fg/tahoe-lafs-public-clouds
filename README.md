@@ -70,9 +70,9 @@ Space amounts in braces are for non-paid accounts, paid ones usually start from
 - [x] Yandex Disk (8-10 GiB, doesn't need special driver - works great with
   [davfs2](https://savannah.nongnu.org/projects/davfs2))
 
-- [x] box.net (5 GiB, experimental)
+- [x] box.net (5 GiB)
 
-- [ ] Ubuntu One (5 GiB)
+- [x] Ubuntu One (5 GiB, experimental)
 
 - [ ] Google Drive (5 GiB)
 
@@ -86,5 +86,6 @@ Fairly long (but still far from complete) list/matrix of such services can be
 found [on
 wikipedia](https://en.wikipedia.org/wiki/Comparison_of_file_hosting_services).
 
-Note that a lot of backends can be used with local file cache and proprietary
-(backend-specific) synchronization tools.
+Note that a lot of backends [can be
+used](http://www.sickness.it/crazycloudexperiment.txt) with local file cache and
+proprietary (backend-specific) synchronization tools.

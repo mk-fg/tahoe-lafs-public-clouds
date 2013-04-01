@@ -76,6 +76,11 @@ def main(argv=None):
 					api = box.txBoxPersistent.from_conf()
 					err += report(tag, *(yield api.get_quota()))
 
+				elif driver == 'txu1':
+					from txu1 import api_v1 as u1
+					api = u1.txU1Persistent.from_conf()
+					err += report(tag, *(yield api.get_quota()))
+
 	def done(res):
 		if reactor.running: reactor.stop()
 		return res

@@ -17,3 +17,6 @@ backends:
 
   txboxdotnet: # uses default ~/.boxrc
     box.net:
+
+  txu1: # uses default ~/.u1rc
+    ubuntu_one:
