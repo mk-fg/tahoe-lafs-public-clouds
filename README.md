@@ -67,12 +67,18 @@ Space amounts in braces are for non-paid accounts, paid ones usually start from
 
 - [x] MS SkyDrive (7-25 GiB)
 
+	Requires: [txSkyDrive](https://pypi.python.org/pypi/txSkyDrive/)
+
 - [x] Yandex Disk (8-10 GiB, doesn't need special driver - works great with
   [davfs2](https://savannah.nongnu.org/projects/davfs2))
 
 - [x] box.net (5 GiB)
 
+	Requires: [txboxdotnet](https://pypi.python.org/pypi/txboxdotnet/)
+
 - [x] Ubuntu One (5 GiB, experimental)
+
+	Requires: [txu1](https://pypi.python.org/pypi/txu1/)
 
 - [ ] Google Drive (5 GiB)
 
