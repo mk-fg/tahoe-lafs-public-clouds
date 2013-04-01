@@ -1,6 +1,7 @@
 #-*- coding: utf-8 -*-
 
 import itertools as it, operator as op, functools as ft
+from os.path import dirname, basename
 from time import time
 
 from zope.interface import implements
@@ -132,8 +133,8 @@ class U1Item(ContainerItem):
 
 	def __init__(self, info, **kwz):
 		self.backend_id = kwz.pop('backend_id', None) or info['content_path']
-		super(BoxItem, self).__init__(
-			kwz.pop('key')
+		super(U1Item, self).__init__(
+			kwz.pop('key'),
 			kwz.pop('modification_date', None) or info['when_changed'], # modification_date
 			self.backend_id, # etag
 			kwz.pop('size', None) or info['size'], # size
@@ -148,7 +149,7 @@ class U1Listing(ContainerListing):
 	is_truncated = 'false'
 
 	def __init__(self, name, prefix, contents):
-		super(BoxListing, self).__init__(
+		super(U1Listing, self).__init__(
 			name, prefix, None, self.max_keys, self.is_truncated, contents=contents )
 
 
@@ -169,7 +170,7 @@ class U1Container(ContainerRateLimitMixin, ContainerRetryMixin):
 	def __init__( self, api, data_path,
 			auth_consumer, auth_token,
 			override_reactor=None ):
-		from txu1.api_v1 import txU1, ProtocolError, DoesNotExists
+		from txu1.api_v1 import txU1, ProtocolError, DoesNotExist
 
 		self.client = txU1(
 			auth_consumer=auth_consumer, auth_token=auth_token,
@@ -178,7 +179,7 @@ class U1Container(ContainerRateLimitMixin, ContainerRetryMixin):
 
 		self._reactor = override_reactor or reactor
 
-		self.ProtocolError, self.DoesNotExists = ProtocolError, DoesNotExists
+		self.ProtocolError, self.DoesNotExist = ProtocolError, DoesNotExist
 		self.ServiceError = ProtocolError
 		super(U1Container, self).__init__(
 			interval=api['tb_interval'], burst=api['tb_burst'] )
@@ -203,7 +204,7 @@ class U1Container(ContainerRateLimitMixin, ContainerRetryMixin):
 			self._listdir_cache = dict()
 			self._listdir_cache_dirs = dict()
 		try: info = yield self._do_request('listdir', self.client.node_info, path, children=True)
-		except DoesNotExists:
+		except self.DoesNotExist:
 			if not top: raise
 			defer.returnValue(None) # will be created
 
@@ -212,22 +213,19 @@ class U1Container(ContainerRateLimitMixin, ContainerRetryMixin):
 			if node['kind'] == 'file':
 				assert node['resource_path'].startswith(self.data_path)
 				key = node['resource_path'][dp_len:].lstrip('/')
-				log.msg('---------- Share key: {!r}'.format(key))
 				self._listdir_cache[key] = U1Item(node, key=key)
 			elif node['kind'] == 'directory':
 				self._listdir_cache_dirs[node['resource_path']] = node['content_path']
-				deferreds.append(
-					self._listdir_cache_build(self, node['resource_path']) )
+				deferreds.append(self._listdir_cache_build(node['resource_path']))
 			else: raise ValueError('Unknown node type: {}'.format(node['kind']))
 		yield defer.DeferredList(deferreds) # make sure all sub-listings finish
 
 	@defer.inlineCallbacks
 	def list_objects(self, prefix=''):
-		log.msg('---------- List prefix: {!r}'.format(prefix))
 		yield self._listdir_cache_lock.acquire()
 		try:
 			if self._listdir_cache is None:
-				yield self._listdir_cache_build(self.data_path)
+				yield self._listdir_cache_build(self.data_path, top=True)
 		finally: self._listdir_cache_lock.release()
 		defer.returnValue(
 			U1Listing(self.data_path, prefix, list(
@@ -245,8 +243,6 @@ class U1Container(ContainerRateLimitMixin, ContainerRetryMixin):
 
 		try: dst = self._listdir_cache_dirs[path_dir]
 		except KeyError:
-			log.msg( '---------- Dir cache miss: {!r}, random key: {!r}'\
-				.format(path_dir, random.choose(list(self._listdir_cache_dirs))) )
 			node = yield self._do_request('bucket mkdir', self.client.node_mkdir, path_dir)
 			self._listdir_cache_dirs[node['resource_path']] = node['content_path']
 			dst = self._listdir_cache_dirs[path_dir]
@@ -254,7 +250,6 @@ class U1Container(ContainerRateLimitMixin, ContainerRetryMixin):
 		node = yield self._do_request( 'put',
 			self.client.file_put_into, content_path=dst, name=path_file_name, data=data )
 		key = node['resource_path'][len(self.data_path):].lstrip('/')
-		log.msg('---------- New share key: {!r}'.format(key))
 		self._listdir_cache[key] = U1Item(node, key=key)
 
 	@defer.inlineCallbacks
