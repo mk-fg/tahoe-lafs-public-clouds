@@ -241,6 +241,7 @@ class SkyDriveContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 			self._bucket_format = '{{:0{}d}}'.format(len(str(folder_buckets)))
 
 		self._reactor = override_reactor or reactor
+		self._chunks_lock = defer.DeferredLock()
 
 		self.ProtocolError, self.DoesNotExists = ProtocolError, DoesNotExists
 		self.ServiceError = ProtocolError
@@ -368,48 +369,56 @@ class SkyDriveContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 		defer.returnValue((chunks, folds))
 
 	@defer.inlineCallbacks
+	def _chunks_find(self):
+		chunk_list, self._folds = yield self._crawl()
+		self._chunks_misplaced = dict()
+		duplicate_debug, chunks = dict(), dict()
+		for fold, info in chunk_list:
+			key, cid = decode_key(info['name']), info['id']
+
+			# Detect various duplicates
+			if key in chunks:
+				fold_dup, info_dup = duplicate_debug[key]
+				if info_dup['updated_time'] > info['updated_time']:
+					(fold, info, cid), (fold_dup, info_dup) =\
+						(fold_dup, info_dup, info_dup['id']), (fold, info)
+				path_dup, path = self.fjoin(fold_dup, key=key), self.fjoin(fold, key=key)
+				log.msg(( 'Detected two shares with the same key: {path_dup!r}'
+							' (mtime={mtime_dup}) and {path!r} (mtime={mtime}).'
+						' Using the latest one (by mtime): {path!r}.'
+						' Remove the older one ({path_dup!r}, id: {id_dup}) manually'
+						' to get rid of this message.' )\
+					.format(
+						path_dup=path_dup, mtime_dup=info_dup['updated_time'],
+						path=path, mtime=info['updated_time'], id_dup=info_dup['id'] ), level=log.WEIRD)
+			if cid in chunks:
+				raise AssertionError( '(API?) Bug: encountered same file_id'
+					' twice, should not be possible: {} (key: {})'.format(cid, key) )
+
+			fold_expected = self.key_bucket(key)
+			if fold_expected != fold:
+				## These are somewhat important, but way too noisy on skydrive.folder_buckets update
+				# log.msg(( 'Detected share (key: {}) in an unexpected folder:'
+				# 	' {} (expected: {})' ).format(key, fold, fold_expected), level=log.UNUSUAL )
+				self._chunks_misplaced[key] = fold, cid
+
+			duplicate_debug[key] = fold, info # kept here for debug messages only
+			chunks[key] = chunks[cid] = SkyDriveItem(info, key=key)
+		self._chunks = chunks
+
+
+	@defer.inlineCallbacks
 	def list_objects(self, prefix=''):
-		if not self._chunks:
-			chunk_list, self._folds = yield self._crawl()
-			self._chunks_misplaced = dict()
-			duplicate_debug, chunks = dict(), dict()
-			for fold, info in chunk_list:
-				key, cid = decode_key(info['name']), info['id']
-
-				# Detect various duplicates
-				if key in chunks:
-					fold_dup, info_dup = duplicate_debug[key]
-					if info_dup['updated_time'] > info['updated_time']:
-						(fold, info, cid), (fold_dup, info_dup) =\
-							(fold_dup, info_dup, info_dup['id']), (fold, info)
-					path_dup, path = self.fjoin(fold_dup, key=key), self.fjoin(fold, key=key)
-					log.msg(( 'Detected two shares with the same key: {path_dup!r}'
-								' (mtime={mtime_dup}) and {path!r} (mtime={mtime}).'
-							' Using the latest one (by mtime): {path!r}.'
-							' Remove the older one ({path_dup!r}, id: {id_dup}) manually'
-							' to get rid of this message.' )\
-						.format(
-							path_dup=path_dup, mtime_dup=info_dup['updated_time'],
-							path=path, mtime=info['updated_time'], id_dup=info_dup['id'] ), level=log.WEIRD)
-				if cid in chunks:
-					raise AssertionError( '(API?) Bug: encountered same file_id'
-						' twice, should not be possible: {} (key: {})'.format(cid, key) )
-
-				fold_expected = self.key_bucket(key)
-				if fold_expected != fold:
-					## These are somewhat important, but way too noisy on skydrive.folder_buckets update
-					# log.msg(( 'Detected share (key: {}) in an unexpected folder:'
-					# 	' {} (expected: {})' ).format(key, fold, fold_expected), level=log.UNUSUAL )
-					self._chunks_misplaced[key] = fold, cid
-
-				duplicate_debug[key] = fold, info # kept here for debug messages only
-				chunks[key] = chunks[cid] = SkyDriveItem(info, key=key)
-
-			self._chunks = chunks
+		yield self._chunks_lock.acquire()
+		try:
+			if self._chunks is None:
+				yield self._chunks_find()
+		finally: self._chunks_lock.release()
 		defer.returnValue(
 			SkyDriveListing(self.folder_name, prefix, list(
 				item for key, item in self._chunks.viewitems()
-				if prefix and key.startswith(prefix) )) )
+				if key != item.backend_id\
+					and (not prefix or key.startswith(prefix)) )) )
 
 
 	@defer.inlineCallbacks
@@ -437,7 +446,6 @@ class SkyDriveContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 			yield self._do_request('delete duplicate chunk', self.client.delete, cid_dup)
 			if fold_dup not in set(it.imap( op.itemgetter(0),
 				self._chunks_misplaced.viewvalues() )): del self._folds[fold_dup]
-
 
 		info['size'] = len(data)
 		info['updated_time'] = datetime.utcnow().isoformat()
