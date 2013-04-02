@@ -204,11 +204,9 @@ node directory:
 All of them are alphanumeric strings of 5-50 characters and must be acquired
 from Ubuntu Single Sign On (Ubuntu SSO) service.
 
-It's a bit of a TODO, but currently it's possible to do that by running example
-code that comes with `txu1 <https://github.com/mk-fg/txu1>` python module.
-
-Basically just run ``python txu1/api_v1.py`` and it'll query email/password,
-creating u1_* files with these credentials in the current dir.
+"u1-cli" tool (that comes with `txu1 <https://github.com/mk-fg/txu1>` python
+module) can be used to get these credentials - just run ``u1-cli auth`` and
+it'll query email/password, then printing consumer/token data to stdout.
 
 
 Configuration parameters
