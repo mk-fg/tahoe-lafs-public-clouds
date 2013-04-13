@@ -437,11 +437,14 @@ class BoxContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 			name, tried_cleanup = encode_key(key), False
 			for fail in xrange(5): # arbitrary 3+ number, to avoid infinite loops
 				try: defer.returnValue((yield self.client.put((name, data), self._folds[fold])))
-				except self.ProtocolError as err: # handle conflicts by removing old file
+				except self.ProtocolError as err: # handle conflicts by find/replacing the old file
 					if err.code != 409: raise
 					try: chunk_id = self._chunks[key].backend_id
 					except KeyError:
-						chunk_id = yield self.client.resolve_path(name, root_id=self._folds[fold])
+						try: chunk_id = yield self.client.resolve_path(name, root_id=self._folds[fold])
+						except self.DoesNotExists: # 409 should mean "it exists!" - api bug/race?
+							if fail > 1: raise err
+							continue # try 1-2 more times (first attempt might've done mkdir)
 					defer.returnValue((yield self.client.put((name, data), file_id=chunk_id)))
 				except KeyError:
 					if fail: raise
