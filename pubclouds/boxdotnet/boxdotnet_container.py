@@ -240,6 +240,7 @@ class BoxContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 
 		self._reactor = override_reactor or reactor
 		self._chunks_lock = defer.DeferredLock()
+		self._chunks_flush()
 
 		self.ProtocolError, self.DoesNotExists = ProtocolError, DoesNotExists
 		self.ServiceError = ProtocolError
@@ -317,13 +318,15 @@ class BoxContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 	def delete(self):
 		yield self._do_request( 'delete root',
 			self.client.delete_folder, self.folder_id, recursive=True )
-		self._chunks.clear()
-		self._folds.clear()
+		self._chunks_flush()
 
 
 	_chunks = None # {file_id1: info1, file_key1: info1, ...}
 	_chunks_misplaced = None # {key: file_id, ...}
 	_folds = None # {fold: folder_id, ...}
+
+	def _chunks_flush(self):
+		self._chunks = self._chunks_misplaced = self._folds = None
 
 	@defer.inlineCallbacks
 	def _first_result(self, *deferreds):
@@ -385,14 +388,15 @@ class BoxContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 						(fold_dup, info_dup, info_dup['id']), (fold, info)
 				path_dup, path = self.fjoin(fold_dup, key=key), self.fjoin(fold, key=key)
 				log.msg(( 'Detected two shares with the same key: {path_dup!r}'
-							' (mtime={mtime_dup}) and {path!r} (mtime={mtime}).'
+							' (id={id_dup}, mtime={mtime_dup}) and {path!r} (id={id}, mtime={mtime}).'
 						' Using the latest one (by mtime): {path!r}.'
 						' Remove the older one ({path_dup!r}, id: {id_dup}) manually'
-						' to get rid of this message.' )\
-					.format(
-						path_dup=path_dup, mtime_dup=info_dup['content_modified_at'],
-						path=path, mtime=info['content_modified_at'], id_dup=info_dup['id'] ), level=log.WEIRD)
-			if cid in chunks:
+							' to get rid of this message.' ).format(
+					id=info['id'], id_dup=info_dup['id'],
+					path_dup=path_dup, mtime_dup=info_dup['content_modified_at'],
+					path=path, mtime=info['content_modified_at'] ), level=log.WEIRD)
+				if cid in chunks: continue # using already processed one
+			elif cid in chunks: # in case of duplicates, might be already recorded
 				raise AssertionError( '(API?) Bug: encountered same file_id'
 					' twice, should not be possible: {} (key: {})'.format(cid, key) )
 
