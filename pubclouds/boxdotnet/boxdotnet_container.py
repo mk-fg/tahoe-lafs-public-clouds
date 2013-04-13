@@ -4,7 +4,7 @@ import itertools as it, operator as op, functools as ft
 from datetime import datetime
 from time import time
 from collections import deque
-import re
+import re, json
 
 from zope.interface import implements
 from twisted.internet import reactor, defer, task
@@ -439,8 +439,19 @@ class BoxContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 				try: defer.returnValue((yield self.client.put((name, data), self._folds[fold])))
 				except self.ProtocolError as err: # handle conflicts by find/replacing the old file
 					if err.code != 409: raise
+					chunk_id = None
 					try: chunk_id = self._chunks[key].backend_id
-					except KeyError:
+					except KeyError: pass
+					err_body = getattr(err, 'body', None) # newer txboxdotnet
+					if chunk_id is None and err_body:
+						try:
+							err_body = json.loads(err_body)
+							assert err_body['code'] == 'item_name_in_use'
+							chunk_id = err_body['context_info']['conflicts'][0]['id']
+						except (ValueError, KeyError, IndexError, AssertionError):
+							log.msg( 'Failed to process request'
+								' error json: {!r}'.format(err_body), level=log.UNUSUAL )
+					if chunk_id is None:
 						try: chunk_id = yield self.client.resolve_path(name, root_id=self._folds[fold])
 						except self.DoesNotExists: # 409 should mean "it exists!" - api bug/race?
 							if fail > 1: raise err
