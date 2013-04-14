@@ -306,14 +306,15 @@ class PubCloudContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 					(fold, info, cid), (fold_dup, info_dup) =\
 						(fold_dup, info_dup, info_dup['id']), (fold, info)
 				path_dup, path = self.fjoin(fold_dup, key=key), self.fjoin(fold, key=key)
-				log.msg(( 'Detected two shares with the same key: {path_dup!r}'
-							' (id={id_dup}, mtime={mtime_dup}) and {path!r} (id={id}, mtime={mtime}).'
-						' Using the latest one (by mtime): {path!r}.'
-						' Remove the older one ({path_dup!r}, id: {id_dup}) manually'
-							' to get rid of this message.' ).format(
-					id=info['id'], id_dup=info_dup['id'],
-					path_dup=path_dup, mtime_dup=info_dup[self.modification_date_key],
-					path=path, mtime=info[self.modification_date_key] ), level=log.WEIRD)
+				if path_dup != path: # API seem to be returning same file twice
+					log.msg(( 'Detected two shares with the same key: {path_dup!r}'
+								' (id={id_dup}, mtime={mtime_dup}) and {path!r} (id={id}, mtime={mtime}).'
+							' Using the latest one (by mtime): {path!r}.'
+							' Remove the older one ({path_dup!r}, id: {id_dup}) manually'
+								' to get rid of this message.' ).format(
+						id=info['id'], id_dup=info_dup['id'],
+						path_dup=path_dup, mtime_dup=info_dup[self.modification_date_key],
+						path=path, mtime=info[self.modification_date_key] ), level=log.WEIRD)
 				if cid in chunks: continue # using already processed one
 			elif cid in chunks: # in case of duplicates, might be already recorded
 				raise AssertionError( '(API?) Bug: encountered same file_id'
