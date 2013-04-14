@@ -10,7 +10,8 @@ from allmydata.node import InvalidValueError, MissingConfigEntry
 from allmydata.util.hashutil import sha1
 from allmydata.util import log
 
-from . import ( encode_key, decode_key,
+from .pubcloud_common import (
+	encode_key, decode_key,
 	PubCloudItem, PubCloudListing, PubCloudContainer )
 
 

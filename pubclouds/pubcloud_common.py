@@ -98,7 +98,7 @@ class PubCloudItem(ContainerItem):
 	modification_date_key = None
 
 	def __init__(self, info, **kwz):
-		assert self.modification_date_key, self.modification_date_key
+		assert self.modification_date_key
 		self.backend_id = kwz.pop('backend_id', None) or info['id']
 		super(PubCloudItem, self).__init__(
 			kwz.pop('key', None) or decode_key(info['name']), # key
@@ -141,9 +141,9 @@ class PubCloudContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 		assert all(attrs), attrs
 
 		if not self.modification_date_key: # try to get it from item type
-			if not isinstance(self.build_item, type):
-				self.modification_date_key = self.build_item.modification_date_key
-			assert self.modification_date_key, self.modification_date_key
+			key = getattr(self.build_item, 'modification_date_key', None)
+			if key: self.modification_date_key = key
+			assert self.modification_date_key
 
 
 	def __repr__(self):
