@@ -210,6 +210,21 @@ class PubCloudContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 		defer.returnValue((yield defer.maybeDeferred(func)))
 
 
+	err503_delays = 30, 60, 120, 300, 600, 1200, 1800
+
+	@defer.inlineCallbacks
+	def err503_wrapper(self, call, *argz, **kwz):
+		for delay in self.err503_delays:
+			try: defer.returnValue((yield call(*argz, **kwz)))
+			except self.ServiceError as err:
+				http_code = getattr(err, 'code', None) or err.args[0]
+				if http_code != http.SERVICE_UNAVAILABLE: raise
+				d = defer.Deferred()
+				self._reactor.callLater(delay, d.callback, None)
+				yield d
+		else: raise err # give up
+
+
 	def create(self):
 		return self._mkdir()
 
@@ -246,7 +261,7 @@ class PubCloudContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 	@defer.inlineCallbacks
 	def _crawl_fold(self, fold, info):
 		sublst = list( (fold, ci) for ci in
-			(yield self._do_request('listdir', self._listdir, info['id'])) )
+			(yield self._do_request('listdir', self.err503_wrapper, self._listdir, info['id'])) )
 		if not sublst:
 			log.msg( 'Pruning empty subdir: {} (id: {})'\
 				.format(fold, info['id']), level=log.OPERATIONAL )
