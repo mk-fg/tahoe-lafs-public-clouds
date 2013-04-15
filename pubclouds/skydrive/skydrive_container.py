@@ -156,8 +156,8 @@ class SkyDriveContainer(PubCloudContainer):
 	def _listdir(self, folder_id):
 		return self.client.listdir(folder_id)
 
-	def _rmdir(self, folder_id):
-		return self.client.delete(folder_id)
+	def _rmdir(self, folder_id, recursive=None):
+		return self.client.delete(folder_id) # always recursive here
 
 
 	@defer.inlineCallbacks

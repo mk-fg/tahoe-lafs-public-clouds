@@ -231,7 +231,7 @@ class PubCloudContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 	@defer.inlineCallbacks
 	def delete(self):
 		yield self._do_request( 'delete root',
-			self.client.delete_folder, self.folder_id, recursive=True )
+			self._rmdir, self.folder_id, recursive=True )
 		self._chunks_flush()
 
 
@@ -239,7 +239,7 @@ class PubCloudContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 	def _listdir(self, folder_id):
 		raise NotImplementedError()
 
-	def _rmdir(self, folder_id):
+	def _rmdir(self, folder_id, recursive=False):
 		raise NotImplementedError()
 
 

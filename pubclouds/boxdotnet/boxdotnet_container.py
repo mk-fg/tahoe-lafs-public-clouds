@@ -154,8 +154,8 @@ class BoxContainer(PubCloudContainer):
 	def _listdir(self, folder_id):
 		return self.client.listdir(folder_id, fields=['name', 'size', 'content_modified_at'])
 
-	def _rmdir(self, folder_id):
-		return self.client.delete_folder(folder_id)
+	def _rmdir(self, folder_id, recursive=False):
+		return self.client.delete_folder(folder_id, recursive=recursive)
 
 
 	@defer.inlineCallbacks
