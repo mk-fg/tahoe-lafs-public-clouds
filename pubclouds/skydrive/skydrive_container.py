@@ -177,8 +177,7 @@ class SkyDriveContainer(PubCloudContainer):
 			fold_dup, cid_dup = self._chunks_misplaced[key]
 			assert fold != fold_dup, fold_dup
 			yield self._do_request('delete duplicate chunk', self.client.delete, cid_dup)
-			if fold_dup not in set(it.imap( op.itemgetter(0),
-				self._chunks_misplaced.viewvalues() )): del self._folds[fold_dup]
+			del self._chunks[cid_dup], self._chunks_misplaced[key]
 
 		info['size'] = len(data)
 		info['updated_time'] = datetime.utcnow().isoformat()
