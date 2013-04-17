@@ -150,6 +150,14 @@ class PubCloudContainer(ContainerRateLimitMixin, ContainerRetryMixin):
 		return '<{} {!r}>'.format(self.__class__.__name__, self.folder_name)
 
 
+	def _key_buckets_init(self, buckets=1, key_hash=sha1):
+		self.folder_buckets = buckets
+		if buckets != 1:
+			self._key_hash = sha1
+			self._key_hash_max = khm = 1 << (8 * sha1('').digest_size)
+			self._key_hash_max = khm - (khm % buckets) - 1
+			self._bucket_format = '{{:0{}d}}'.format(len(str(buckets)))
+
 	def key_bucket(self, key, prefix=''):
 		# Can return any string, which will be used as a subdir for key.
 		# Subdir can have multiple components (subdirs) in it. Can also be empty.

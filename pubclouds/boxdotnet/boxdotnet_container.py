@@ -7,7 +7,6 @@ import re, json
 from twisted.internet import reactor, defer
 
 from allmydata.node import InvalidValueError, MissingConfigEntry
-from allmydata.util.hashutil import sha1
 from allmydata.util import log
 
 from .pubcloud_common import (
@@ -135,12 +134,7 @@ class BoxContainer(PubCloudContainer):
 		self.folder_name = folder_path or folder_id
 		if self.folder_id is None: reactor.callLater(1, self._mkdir_root)
 
-		self.folder_buckets = folder_buckets
-		if folder_buckets != 1:
-			self._key_hash = sha1
-			self._key_hash_max = khm = 1 << (8 * sha1('').digest_size)
-			self._key_hash_max = khm - (khm % folder_buckets) - 1
-			self._bucket_format = '{{:0{}d}}'.format(len(str(folder_buckets)))
+		self._key_buckets_init(folder_buckets)
 
 		self.ProtocolError, self.DoesNotExists = ProtocolError, DoesNotExists
 		self.ServiceError = ProtocolError
