@@ -4,9 +4,11 @@ import itertools as it, operator as op, functools as ft
 from os.path import dirname, basename
 
 from twisted.internet import reactor, defer
+from twisted.web import http
 
 from allmydata.node import InvalidValueError, MissingConfigEntry
 from allmydata.util import log
+from allmydata.storage.backends.cloud.cloud_common import CloudError
 
 from .pubcloud_common import (
 	encode_key, decode_key,
@@ -64,7 +66,8 @@ def configure_u1_container(storedir, config):
 		raise InvalidValueError('u1.dir_buckets value must be a positive integer.')
 
 	data_path = config.get_config('storage', 'u1.path')
-	return U1Container(api_parameters, data_path, dir_buckets, u1_consumer, u1_token)
+	return U1Container( api_parameters, data_path,
+		u1_consumer, u1_token, dir_buckets=dir_buckets )
 
 
 
@@ -127,7 +130,6 @@ class U1Container(PubCloudContainer):
 	def _mkdir(self): pass
 
 	def _rmdir(self): raise NotImplementedError('Should not be used in U1 driver')
-	def _chunks_flush(self): pass # custom caches here
 
 	def delete(self):
 		return self._do_request('delete root', self.client.node_delete, self.data_path)
@@ -142,6 +144,7 @@ class U1Container(PubCloudContainer):
 			info['type'] = 'folder' if info['kind'] == 'directory' else 'file'
 			if info['type'] == 'folder':
 				info['id'] = info['resource_path']
+				info['name'] = basename(info['id'].rstrip('/'))
 				self._listdir_cache[info['id']] = info['content_path']
 			else:
 				info['id'] = info['content_path']
@@ -156,16 +159,18 @@ class U1Container(PubCloudContainer):
 		assert not metadata, metadata
 
 		fold = self.key_bucket(key)
-		dst_id = self._folds[fold]
-		try: dst = self._listdir_cache[dst_id]
-		except KeyError:
-			info = yield self._do_request( 'bucket mkdir',
-				self.client.node_mkdir, join(self.data_path, fold) )
-			self._listdir_cache[dst_id] = info['content_path']
-			dst = self._listdir_cache[dst_id]
-
-		item = self.build_item((yield self._do_request( 'upload',
-			self.client.file_put_into, content_path=dst, name=encode_key(key), data=data )))
+		for fail in xrange(2):
+			try:
+				dst_id = self._folds[fold]
+				dst = self._listdir_cache[dst_id]
+				item = self.build_item((yield self._do_request( 'upload',
+					self.client.file_put_into, content_path=dst, name=encode_key(key), data=data )))
+			except (KeyError, self.DoesNotExists):
+				if fail: raise
+				info = yield self._do_request( 'bucket mkdir',
+					self.client.node_mkdir, join(self.data_path, fold) )
+				self._folds[fold] = dst_id = info['resource_path']
+				self._listdir_cache[dst_id] = dst = info['content_path']
 
 		# Make sure there won't be two same-key chunks in different folders
 		if key in self._chunks_misplaced:
