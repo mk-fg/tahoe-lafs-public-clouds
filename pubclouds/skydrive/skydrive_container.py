@@ -181,7 +181,7 @@ class SkyDriveContainer(PubCloudContainer):
 
 		info['size'] = len(data)
 		info['updated_time'] = datetime.utcnow().isoformat()
-		self._chunks[key] = self._chunks[info['id']] = SkyDriveItem(info, key=key)
+		self._chunks[key] = self._chunks[info['id']] = self.build_item(info, key=key)
 
 
 	@defer.inlineCallbacks
