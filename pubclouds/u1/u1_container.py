@@ -59,8 +59,12 @@ def configure_u1_container(storedir, config):
 	if api_parameters['tb_burst'] <= 0:
 		raise InvalidValueError('u1.api.ratelimit.burst value must be a positive integer.')
 
+	dir_buckets = int(config.get_config('storage', 'u1.dir_buckets', 1))
+	if dir_buckets < 1:
+		raise InvalidValueError('u1.dir_buckets value must be a positive integer.')
+
 	data_path = config.get_config('storage', 'u1.path')
-	return U1Container(api_parameters, data_path, u1_consumer, u1_token)
+	return U1Container(api_parameters, data_path, dir_buckets, u1_consumer, u1_token)
 
 
 
@@ -78,8 +82,10 @@ class U1Item(PubCloudItem):
 	modification_date_key = 'when_changed'
 
 	def __init__(self, info, **kwz):
-		assert 'key' in kwz, kwz
-		info['id'] = info['content_path']
+		# path is used for delete and info, id for get
+		if 'id' not in info: kwz.setdefault('backend_id', info['content_path'])
+		if 'path' not in info: kwz.setdefault('path', info['resource_path'])
+		if 'name' not in info: info['name'] = basename(info['resource_path'].rstrip('/'))
 		super(U1Item, self).__init__(info, **kwz)
 
 class U1Listing(PubCloudListing): pass
@@ -89,13 +95,17 @@ class U1Container(PubCloudContainer):
 
 	def __init__( self, api, data_path,
 			auth_consumer, auth_token,
-			override_reactor=None ):
+			dir_buckets=1, override_reactor=None ):
 		from txu1.api_v1 import txU1, ProtocolError, DoesNotExists
 
 		self.client = txU1(
 			auth_consumer=auth_consumer, auth_token=auth_token,
 			debug_requests=api['debug'], request_io_timeouts=api['timeouts'] )
 		self.data_path = data_path
+
+		self.folder_id = self.folder_name = self.data_path
+		self._key_buckets_init(dir_buckets)
+		self._listdir_cache = dict() # {resource_path: content_path, ...} for one-req puts
 
 		self.ProtocolError, self.DoesNotExists = ProtocolError, DoesNotExists
 		self.ServiceError = ProtocolError
@@ -105,14 +115,17 @@ class U1Container(PubCloudContainer):
 			tb_interval=api['tb_interval'], tb_burst=api['tb_burst'],
 			override_reactor=override_reactor )
 
-		self._listdir_cache = None # to be filled
-		self._listdir_cache_dirs = None # used on put requests
 
-	def __repr__(self):
-		return '<{} {!r}>'.format(self.__class__.__name__, self.data_path)
+	# Paths are auto-created here
+	@defer.inlineCallbacks
+	def _mkdir_wrapper(self, func, path=''):
+		try: defer.returnValue((yield defer.maybeDeferred(func)))
+		except self.ProtocolError as err: http_code = err.code
+		except CloudError as err: http_code = err.args[1]
+		if http_code not in [http.NOT_FOUND, http.GONE]: raise
+		defer.returnValue(list())
+	def _mkdir(self): pass
 
-
-	def _mkdir(self): pass # paths are auto-created here
 	def _rmdir(self): raise NotImplementedError('Should not be used in U1 driver')
 	def _chunks_flush(self): pass # custom caches here
 
@@ -121,40 +134,20 @@ class U1Container(PubCloudContainer):
 
 
 	@defer.inlineCallbacks
-	def _listdir_cache_build(self, path, top=False):
-		if top:
-			self._listdir_cache = dict()
-			self._listdir_cache_dirs = dict()
-		try:
-			info = yield self._do_request( 'listdir',
-				self.err503_wrapper, self.client.node_info, path, children=True )
-		except self.DoesNotExists:
-			if not top: raise
-			defer.returnValue(None) # will be created
-
-		deferreds, dp_len = list(), len(self.data_path)
-		for node in info['children']:
-			if node['kind'] == 'file':
-				assert node['resource_path'].startswith(self.data_path)
-				key = node['resource_path'][dp_len:].lstrip('/')
-				self._listdir_cache[key] = self.build_item(node, key=key)
-			elif node['kind'] == 'directory':
-				self._listdir_cache_dirs[node['resource_path']] = node['content_path']
-				deferreds.append(self._listdir_cache_build(node['resource_path']))
-			else: raise ValueError('Unknown node type: {}'.format(node['kind']))
-		yield defer.DeferredList(deferreds) # make sure all sub-listings finish
-
-	@defer.inlineCallbacks
-	def list_objects(self, prefix=''):
-		yield self._chunks_lock.acquire()
-		try:
-			if self._listdir_cache is None:
-				yield self._listdir_cache_build(self.data_path, top=True)
-		finally: self._chunks_lock.release()
-		defer.returnValue(
-			self.build_listing(self.data_path, prefix, list(
-				item for key, item in self._listdir_cache.viewitems()
-				if not prefix or key.startswith(prefix) )) )
+	def _listdir(self, path):
+		res = yield self.client.node_info(path, children=True)
+		# Adapt to {name: encoded_share_path, type: ..., id: ...} convention other clouds use
+		lst = list()
+		for info in res['children']:
+			info['type'] = 'folder' if info['kind'] == 'directory' else 'file'
+			if info['type'] == 'folder':
+				info['id'] = info['resource_path']
+				self._listdir_cache[info['id']] = info['content_path']
+			else:
+				info['id'] = info['content_path']
+				info['name'] = basename(info['resource_path'].rstrip('/'))
+			lst.append(info)
+		defer.returnValue(lst)
 
 
 	@defer.inlineCallbacks
@@ -162,29 +155,35 @@ class U1Container(PubCloudContainer):
 		assert not content_type, content_type
 		assert not metadata, metadata
 
-		path_file = join(self.data_path, key)
-		path_dir, path_file_name = dirname(path_file), basename(path_file)
-
-		try: dst = self._listdir_cache_dirs[path_dir]
+		fold = self.key_bucket(key)
+		dst_id = self._folds[fold]
+		try: dst = self._listdir_cache[dst_id]
 		except KeyError:
-			node = yield self._do_request('bucket mkdir', self.client.node_mkdir, path_dir)
-			self._listdir_cache_dirs[node['resource_path']] = node['content_path']
-			dst = self._listdir_cache_dirs[path_dir]
+			info = yield self._do_request( 'bucket mkdir',
+				self.client.node_mkdir, join(self.data_path, fold) )
+			self._listdir_cache[dst_id] = info['content_path']
+			dst = self._listdir_cache[dst_id]
 
-		node = yield self._do_request( 'put',
-			self.client.file_put_into, content_path=dst, name=path_file_name, data=data )
-		key = node['resource_path'][len(self.data_path):].lstrip('/')
-		self._listdir_cache[key] = self.build_item(node, key=key)
+		item = self.build_item((yield self._do_request( 'upload',
+			self.client.file_put_into, content_path=dst, name=encode_key(key), data=data )))
+
+		# Make sure there won't be two same-key chunks in different folders
+		if key in self._chunks_misplaced:
+			fold_dup, cid_dup = self._chunks_misplaced[key]
+			assert fold != fold_dup, fold_dup
+			info_dup = self._chunks[cid_dup]
+			yield self._do_request('delete duplicate chunk', self.client.node_delete, info_dup['path'])
+			del self._chunks[cid_dup], self._chunks_misplaced[key]
+
+		self._chunks[key] = self._chunks[item.backend_id] = item
 
 	@defer.inlineCallbacks
 	def delete_object(self, key):
-		yield self._do_request('delete', self.client.node_delete, join(self.data_path, key))
-		del self._listdir_cache[key]
+		item = self._chunks[key]
+		yield self._do_request('delete', self.client.node_delete, item.path)
+		del self._chunks[key], self._chunks[item.backend_id]
 
 
 	def get_object(self, key):
 		return self._do_request( 'get', self.client.file_get,
-			content_path=self._listdir_cache[key].backend_id )
-
-	def head_object(self, key):
-		return self._listdir_cache[key]
+			content_path=self._chunks[key].backend_id )

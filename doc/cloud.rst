@@ -227,6 +227,21 @@ To enable storing shares on SkyDrive, add the following keys to the server's
 
     Example: /~/myvolume/tahoe/storage
 
+``u1.dir_buckets = (integer, positive integer, optional), default 1``
+
+    Number of subfolders (aka storage buckets) to distribute shares between.
+
+    Multiple folders will take additional http requests to create and traverse
+    (on shares' discovery), but may work faster and avoid API limitations and
+    shortcomings.
+
+    Share chunks will be balanced between these evenly.
+
+    Can be changed at any time. No rebalancing to even number of files will be
+    performed automatically, but it can be done manually when node is offline.
+
+    If set to 1 (default), no additional folders will be created.
+
 ``private/u1_consumer_key (required)``
 
 ``private/u1_consumer_secret (required)``
