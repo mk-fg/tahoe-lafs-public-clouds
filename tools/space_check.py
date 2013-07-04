@@ -31,6 +31,9 @@ def main(argv=None):
 	import argparse
 	parser = argparse.ArgumentParser(
 		description='Tool to monitor free disk space on tahoe cloud backends.')
+	parser.add_argument('-c', '--config',
+		metavar='path', default='{}.yaml'.format(splitext(__file__)[0]),
+		help='Path to configuration file (default: %(default)s).')
 	parser.add_argument('--debug',
 		action='store_true', help='Verbose operation mode.')
 	optz = parser.parse_args(argv if argv is not None else sys.argv[1:])
@@ -39,8 +42,7 @@ def main(argv=None):
 	log = logging.getLogger()
 	logging.basicConfig(level=logging.WARNING if not optz.debug else logging.DEBUG)
 
-	with open('{}.yaml'.format(splitext(__file__)[0])) as conf:
-		conf = yaml.load(conf)
+	with open(optz.config) as conf: conf = yaml.load(conf)
 
 	@defer.inlineCallbacks
 	def check_df():

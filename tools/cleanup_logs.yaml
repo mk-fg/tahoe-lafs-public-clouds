@@ -1,0 +1,57 @@
+
+# Space is always checked in this path, required.
+base_path: /home/tahoe/grids
+
+space:
+  # Files are only removed when free space is lower than "keep_free" value.
+
+  # Numbers here can have following suffixes: K (2**10), M (2**20), G (ditto), T.
+  # Standard YAML also supports notations like 2_500_000 or 20e6.
+
+  # Amount of free space to try to keep free.
+  # It might not be possible due to limits on min number of files or timestamps.
+  keep_free: 1.5G
+
+  # Issue warnings (and return error exit status) if
+  #  free space drops below this mark, despite cleanup.
+  warn: 700M
+
+cleanup:
+  # When space has to be freed, non-preserved files are removed in oldest-first order.
+  # "importance" parameter determines which of the matches are removed last.
+  # Priority of specific pattern is calculated as: importance / files_left_to_cleanup
+  # For example, 1 file matching pattern with importance=5
+  #  will be removed for each 5 files of importance=1 pattern.
+  # Also, for patterns that span multiple dirs - files
+  #  get removed from dirs with most matches (left) first.
+
+  twistd_logs: # alias is used only in logs
+    glob: # can be either string (pattern) or list of strings
+      - '*/*/logs/twistd.log.*'
+      - '*/*/twistd.log.*'
+    # stale: don't touch logs newer than that.
+    # Timestamps can be in any format recognized by coreutils date tool, python
+    #  dateutil module (if present) or simple offsets into the past like
+    #  1d, 1d3h15m, 1y6mo, 3w2d, 5min60sec (units: y/yr, mo, w, d, h/hr, m/min, s/sec)
+    stale: 2d
+    # keep_global: # total number of matching files to keep
+    keep_for_dir: 2 # number of newest matched files in one dir to preserve
+    importance: 1 # influences order in which logs are removed
+
+  incidents_node:
+    glob: '*/*/logs/incidents/incident-*.flog.bz2'
+    stale: 2d
+    keep_for_dir: 4
+    importance: 5
+
+  incidents_gathered:
+    glob: '*/incidents/incidents/*/incident-*.flog.bz2'
+    stale: 5d
+    keep_for_dir: 10
+    keep_global: 50
+    importance: 3
+
+  logs_gathered:
+    glob: '*/logs/*.flog'
+    stale: 4d
+    importance: 10
