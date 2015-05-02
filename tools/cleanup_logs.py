@@ -113,7 +113,7 @@ def main(argv=None):
 	log = logging.getLogger()
 	logging.basicConfig(level=logging.WARNING if not optz.debug else logging.DEBUG)
 
-	with open(optz.config) as conf: conf = yaml.load(conf)
+	with open(optz.config) as conf: conf = yaml.safe_load(conf)
 
 	path_base = conf['base_path']
 	os.chdir(path_base)
